@@ -83,6 +83,27 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6K1apdChvhOwImSk93zexZovS0
 # ==============================================================================
 # CƠ CHẾ KHÓA ĐƠN TIẾN TRÌNH (SINGLE-INSTANCE LOCK — CHỐNG LỖI 409 CONFLICT)
 # ==============================================================================
+def is_pid_running(pid: int) -> bool:
+    """Kiểm tra xem PID có đang thực sự chạy hay không (Hỗ trợ cả Windows và Linux)."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+        except Exception:
+            return False
+
 def acquire_single_instance_lock():
     """Tự động kiểm tra và triệt tiêu tiến trình cũ nếu bị treo, đảm bảo không xung đột 409."""
     current_pid = os.getpid()
@@ -92,9 +113,14 @@ def acquire_single_instance_lock():
                 content = f.read().strip()
                 if content.isdigit():
                     old_pid = int(content)
-                    if old_pid != current_pid:
-                        # Diệt tiến trình cũ trên Windows nếu còn chạy ngầm
-                        os.system(f"taskkill /PID {old_pid} /F >nul 2>&1")
+                    if old_pid != current_pid and is_pid_running(old_pid):
+                        if os.name == "nt":
+                            os.system(f"taskkill /PID {old_pid} /F >nul 2>&1")
+                        else:
+                            try:
+                                os.kill(old_pid, 9)
+                            except Exception:
+                                pass
                         time.sleep(2.5)  # Chờ để Telegram server giải phóng socket getUpdates cũ
         except Exception:
             pass
