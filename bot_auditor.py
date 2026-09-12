@@ -144,6 +144,24 @@ def cleanup_lock():
 
 atexit.register(cleanup_lock)
 
+def check_cloud_coexistence():
+    """Kiểm tra và cảnh báo nếu bot trên Render Cloud đang chạy song song (nguyên nhân gây 409 Conflict)."""
+    if os.getenv("RENDER") == "true":
+        return
+    try:
+        r = requests.get("https://vibecheck-ai-bot.onrender.com", timeout=2.0)
+        if r.status_code == 200 and "VibeCheck AI" in r.text:
+            print("\n" + "!" * 80, flush=True)
+            print("⚠️  CẢNH BÁO XUNG ĐỘT TIẾN TRÌNH CLOUD & LOCAL (TELEGRAM 409 CONFLICT):", flush=True)
+            print("   Dịch vụ VibeCheck AI trên Render Cloud (https://vibecheck-ai-bot.onrender.com) đang HOẠT ĐỘNG 24/7.", flush=True)
+            print("   Telegram chỉ cho phép DUY NHẤT 1 tiến trình lắng nghe (getUpdates) cho mỗi Bot Token.", flush=True)
+            print("   👉 NẾU BẠN DÙNG BOT BÌNH THƯỜNG: Bạn có thể TẮT máy tính/cửa sổ này, Bot Cloud vẫn chạy 24/7!", flush=True)
+            print("   👉 NẾU BẠN CẦN TEST LOCAL: Vui lòng vào Render Dashboard (https://dashboard.render.com)")
+            print("      chọn 'vibecheck-ai-bot' -> 'Suspend' để nhường socket Telegram cho máy Local.", flush=True)
+            print("!" * 80 + "\n", flush=True)
+    except Exception:
+        pass
+
 # ==============================================================================
 # BỘ NHỚ AN TOÀN ĐA LUỒNG & GIỚI HẠN RAM (THREAD-SAFE BOUNDED CACHE)
 # ==============================================================================
@@ -1996,6 +2014,7 @@ def main():
 
     # 1. Kích hoạt cơ chế khóa đơn tiến trình (Single-Instance Lock)
     acquire_single_instance_lock()
+    check_cloud_coexistence()
 
     # 2. Kiểm tra biến môi trường
     if not TELEGRAM_BOT_TOKEN or len(TELEGRAM_BOT_TOKEN.strip()) < 10:
