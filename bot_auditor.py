@@ -75,6 +75,7 @@ backlog_mgr = BacklogManager(BACKLOG_FILE)
 state_mgr = RemindedStateManager(BASE_DIR)
 
 # Tải biến môi trường từ .env (override=True để file .env luôn được ưu tiên cao nhất)
+load_dotenv(os.path.expanduser("~/.eks/secrets/.env"), override=True)
 load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -198,6 +199,11 @@ def get_history(chat_id: int) -> list:
 def clear_history(chat_id: int):
     with CACHE_LOCK:
         CONVERSATION_HISTORY.pop(chat_id, None)
+
+def pop_last_history_turn(chat_id: int):
+    with CACHE_LOCK:
+        if chat_id in CONVERSATION_HISTORY and len(CONVERSATION_HISTORY[chat_id]) >= 2:
+            CONVERSATION_HISTORY[chat_id] = CONVERSATION_HISTORY[chat_id][:-2]
 
 
 # ==============================================================================
@@ -822,6 +828,75 @@ def execute_dual_pass_audit(raw_contents, source_label: str = "Tài liệu / Ý 
 
 execute_triple_pass_audit = execute_dual_pass_audit
 
+def autonomous_redteam_review(chat_id: int, user_request: str, cto_output: str) -> tuple[str, bool]:
+    """
+    TỰ ĐỘNG HÓA ĐA ĐẶC VỤ (AUTONOMOUS DUAL-AGENT PIPELINE):
+    Sau khi CTO đưa ra giải pháp, Red Team tự động can thiệp ngầm để thẩm định và bóc tách lỗ hổng.
+    Nếu Red Team phán cờ ĐỎ: Tự động hủy bỏ dự án ngay tại chỗ, xóa sạch khỏi bộ nhớ, cảnh báo Founder!
+    Trả về (final_text, is_cancelled).
+    """
+    non_audit_keywords = ["chào", "hello", "hi", "bạn là ai", "hướng dẫn", "trợ giúp", "/help", "/start", "cảm ơn", "tính năng", "lệnh"]
+    if len(user_request.strip()) < 20 and any(k in user_request.lower() for k in non_audit_keywords):
+        return cto_output, False
+
+    try:
+        from bot_redteam import call_gemini_redteam
+        
+        # Cắt bớt văn bản đầu vào nếu quá dài để bảo vệ ngân sách token
+        clean_user_input = user_request.strip()
+        if len(clean_user_input) > 2000:
+            clean_user_input = clean_user_input[:2000] + "... [Dữ liệu gốc đã được tóm lược]"
+            
+        clean_cto_output = cto_output.strip()
+        if len(clean_cto_output) > 2500:
+            clean_cto_output = clean_cto_output[:2500] + "... [Đề xuất CTO đã được tóm lược]"
+
+        prompt_to_redteam = (
+            f"FOUNDER KEVIN YÊU CẦU / DỮ LIỆU ĐẦU VÀO:\n{clean_user_input}\n\n"
+            f"CTO ĐÃ ĐỀ XUẤT PHƯƠNG ÁN / THẨM ĐỊNH:\n{clean_cto_output}\n\n"
+            "Là Thủ Lĩnh Red Team Độc Lập: Hãy thẩm định đối kháng xem ý tưởng/công nghệ/dự án này có đáng làm không. "
+            "BẬT ĐÈN TÍN HIỆU (🔴 ĐỎ / 🟡 VÀNG / 🟢 XANH). "
+            "Nếu cờ ĐỎ (rủi ro chí mạng, bánh vẽ, lừa đảo, hoặc đốt tiền vô ích): Ra lệnh cho CTO HỦY BỎ DỰ ÁN NGAY LẬP TỨC và nêu rõ 3 lý do chí mạng!\n"
+            "Nếu cờ VÀNG hoặc XANH: Nêu rõ lưu ý phản biện và phương án B tối ưu nhất cho Founder."
+        )
+        
+        redteam_verdict = call_gemini_redteam(chat_id, prompt_to_redteam, save_memory=False)
+        
+        is_red = ("🔴" in redteam_verdict) or ("cờ đỏ" in redteam_verdict.lower()) or ("đỏ:" in redteam_verdict.lower()) or ("hủy bỏ" in redteam_verdict.lower() and "yêu cầu" in redteam_verdict.lower())
+        
+        if is_red:
+            pop_last_history_turn(chat_id)
+            combined = (
+                f"🚦 **KẾT LUẬN LIÊN ĐOÀN: 🔴 ĐÃ TỰ ĐỘNG HỦY BỎ (PROJECT CANCELLED)**\n"
+                f"*(Red Team đã can thiệp ngầm, phát hiện rủi ro chí mạng và ra lệnh CTO đình chỉ ngay lập tức)*\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 **1. ĐỀ XUẤT BAN ĐẦU CỦA CTO:**\n"
+                f"{cto_output}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🛡️ **2. ĐÒN PHẢN BIỆN & LỆNH HỦY TỪ RED TEAM:**\n"
+                f"{redteam_verdict}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🧹 **3. BẢO VỆ BỘ NHỚ FOUNDER:**\n"
+                f"✅ Toàn bộ ý tưởng rủi ro này đã bị **HỦY BỎ & XÓA KHỎI BỘ NHỚ TẠM**, không lưu vào Action Backlog để bảo vệ tài nguyên của Founder!"
+            )
+            return combined, True
+        else:
+            combined = (
+                f"🚦 **KẾT LUẬN LIÊN ĐOÀN: 🟢 ĐÃ THẨM ĐỊNH & PHÊ DUYỆT (APPROVED)**\n"
+                f"*(CTO đề xuất + Red Team đã kiểm chứng độ an toàn & khả thi)*\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 **1. GIẢI PHÁP CỐT LÕI CỦA CTO:**\n"
+                f"{cto_output}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🛡️ **2. LƯU Ý PHẢN BIỆN TỪ RED TEAM:**\n"
+                f"{redteam_verdict}"
+            )
+            return combined, False
+            
+    except Exception as e:
+        print(f"⚠️ Autonomous RedTeam Review Error: {e}", flush=True)
+        return cto_output, False
+
 
 # ==============================================================================
 # HÀM XỬ LÝ CHẾ ĐỘ 2: CTO ADVISOR & SEARCH PARTNER
@@ -1257,18 +1332,24 @@ def setup_bot():
             safe_edit_message(bot, chat_id, status_msg_id, "🧠 V1: Bóc tách kỹ thuật... ➡️ V2: CTO Phản biện... ➡️ V3: Reflexion & Tối ưu...")
             clean_report, meta_info = execute_dual_pass_audit(contents, source_label="Ảnh chụp màn hình")
 
+            safe_edit_message(bot, chat_id, status_msg_id, "🛡️ Bot Red Team đang tự động thẩm định đối kháng...")
+            final_report, is_cancelled = autonomous_redteam_review(chat_id, caption if caption else "Ảnh chụp màn hình", clean_report)
+
             audit_id = str(int(time.time()))[-6:]
             cache_audit_data(audit_id, meta_info)
 
-            add_to_history(chat_id, "user", f"[Gửi ảnh chụp màn hình] {caption}")
-            add_to_history(chat_id, "model", clean_report[:800])
-
-            clean_report += "\n\n💡 <i>Báo cáo đang xem tạm thời trong RAM. Bấm nút <b>[💾 Lưu]</b> hoặc <b>[🔄 Thay thế]</b> bên dưới nếu sếp muốn lưu vào máy tính.</i>"
-
             if status_msg_id:
                 safe_delete_message(bot, chat_id, status_msg_id)
-            markup = create_action_buttons(audit_id, is_video=False, comparison_info=meta_info.get("comparison"), verdict=meta_info.get("verdict"))
-            send_long_message(bot, chat_id, clean_report, reply_to_message_id=message.message_id, reply_markup=markup)
+
+            if is_cancelled:
+                meta_info["verdict"] = "🔴"
+                send_long_message(bot, chat_id, final_report, reply_to_message_id=message.message_id, reply_markup=None)
+            else:
+                add_to_history(chat_id, "user", f"[Gửi ảnh chụp màn hình] {caption}")
+                add_to_history(chat_id, "model", final_report[:800])
+                final_report += "\n\n💡 <i>Báo cáo đang xem tạm thời trong RAM. Bấm nút <b>[💾 Lưu]</b> hoặc <b>[🔄 Thay thế]</b> bên dưới nếu sếp muốn lưu vào máy tính.</i>"
+                markup = create_action_buttons(audit_id, is_video=False, comparison_info=meta_info.get("comparison"), verdict=meta_info.get("verdict"))
+                send_long_message(bot, chat_id, final_report, reply_to_message_id=message.message_id, reply_markup=markup)
         except PermissionError as pe:
             safe_edit_message(bot, chat_id, status_msg_id, f"❌ <b>LỖI XÁC THỰC AI:</b>\n{pe}")
         except Exception as e:
@@ -1309,18 +1390,24 @@ def setup_bot():
             safe_edit_message(bot, chat_id, status_msg_id, "🧠 V1: Trích xuất kiến trúc... ➡️ V2: CTO Phản biện... ➡️ V3: Reflexion & Tối ưu...")
             clean_report, meta_info = execute_dual_pass_audit(contents, source_label=doc.file_name or "Tài liệu PDF")
 
+            safe_edit_message(bot, chat_id, status_msg_id, "🛡️ Bot Red Team đang tự động thẩm định đối kháng...")
+            final_report, is_cancelled = autonomous_redteam_review(chat_id, doc.file_name or "Tài liệu PDF", clean_report)
+
             audit_id = str(int(time.time()))[-6:]
             cache_audit_data(audit_id, meta_info)
 
-            add_to_history(chat_id, "user", f"[Gửi tài liệu PDF] {doc.file_name}")
-            add_to_history(chat_id, "model", clean_report[:800])
-
-            clean_report += "\n\n💡 <i>Báo cáo đang xem tạm thời trong RAM. Bấm nút <b>[💾 Lưu]</b> hoặc <b>[🔄 Thay thế]</b> bên dưới nếu sếp muốn lưu vào máy tính.</i>"
-
             if status_msg_id:
                 safe_delete_message(bot, chat_id, status_msg_id)
-            markup = create_action_buttons(audit_id, is_video=False, comparison_info=meta_info.get("comparison"), verdict=meta_info.get("verdict"))
-            send_long_message(bot, chat_id, clean_report, reply_to_message_id=message.message_id, reply_markup=markup)
+
+            if is_cancelled:
+                meta_info["verdict"] = "🔴"
+                send_long_message(bot, chat_id, final_report, reply_to_message_id=message.message_id, reply_markup=None)
+            else:
+                add_to_history(chat_id, "user", f"[Gửi tài liệu PDF] {doc.file_name}")
+                add_to_history(chat_id, "model", final_report[:800])
+                final_report += "\n\n💡 <i>Báo cáo đang xem tạm thời trong RAM. Bấm nút <b>[💾 Lưu]</b> hoặc <b>[🔄 Thay thế]</b> bên dưới nếu sếp muốn lưu vào máy tính.</i>"
+                markup = create_action_buttons(audit_id, is_video=False, comparison_info=meta_info.get("comparison"), verdict=meta_info.get("verdict"))
+                send_long_message(bot, chat_id, final_report, reply_to_message_id=message.message_id, reply_markup=markup)
         except PermissionError as pe:
             safe_edit_message(bot, chat_id, status_msg_id, f"❌ <b>LỖI XÁC THỰC AI:</b>\n{pe}")
         except Exception as e:
@@ -1358,12 +1445,16 @@ def setup_bot():
             )
             cto_answer = call_gemini_resilient([voice_part, transcribe_prompt], instruction=SYSTEM_PROMPT_CTO_CHAT, temperature=0.3)
             
+            safe_edit_message(bot, chat_id, status_msg_id, "🛡️ Bot Red Team đang tự động thẩm định đối kháng...")
+            final_answer, is_cancelled = autonomous_redteam_review(chat_id, "[Tin nhắn thoại voice note]", cto_answer)
+
             if status_msg_id:
                 safe_delete_message(bot, chat_id, status_msg_id)
-            send_long_message(bot, chat_id, cto_answer, reply_to_message_id=message.message_id)
+            send_long_message(bot, chat_id, final_answer, reply_to_message_id=message.message_id)
             
-            add_to_history(chat_id, "user", "[Tin nhắn thoại voice note]")
-            add_to_history(chat_id, "model", cto_answer[:800])
+            if not is_cancelled:
+                add_to_history(chat_id, "user", "[Tin nhắn thoại voice note]")
+                add_to_history(chat_id, "model", final_answer[:800])
         except PermissionError as pe:
             safe_edit_message(
                 bot, chat_id, status_msg_id,
@@ -1558,18 +1649,24 @@ def setup_bot():
                 safe_edit_message(bot, chat_id, status_msg_id, "🧠 V1: Bóc tách kỹ thuật... ➡️ V2: CTO Phản biện... ➡️ V3: Reflexion & Tối ưu...")
                 clean_report, meta_info = execute_dual_pass_audit(prompt_content, source_label=source_label)
 
+                safe_edit_message(bot, chat_id, status_msg_id, "🛡️ Bot Red Team đang tự động thẩm định đối kháng...")
+                final_report, is_cancelled = autonomous_redteam_review(chat_id, text if text else source_label, clean_report)
+
                 audit_id = str(int(time.time()))[-6:]
                 cache_audit_data(audit_id, meta_info)
 
-                add_to_history(chat_id, "user", text)
-                add_to_history(chat_id, "model", clean_report[:800])
-
-                clean_report += "\n\n💡 <i>Báo cáo đang xem tạm thời trong RAM. Bấm nút <b>[💾 Lưu]</b> hoặc <b>[🔄 Thay thế]</b> bên dưới nếu sếp muốn lưu vào máy tính.</i>"
-
                 if status_msg_id:
                     safe_delete_message(bot, chat_id, status_msg_id)
-                markup = create_action_buttons(audit_id, is_video=is_video_audit, comparison_info=meta_info.get("comparison"), verdict=meta_info.get("verdict"))
-                send_long_message(bot, chat_id, clean_report, reply_to_message_id=message.message_id, reply_markup=markup)
+
+                if is_cancelled:
+                    meta_info["verdict"] = "🔴"
+                    send_long_message(bot, chat_id, final_report, reply_to_message_id=message.message_id, reply_markup=None)
+                else:
+                    add_to_history(chat_id, "user", text)
+                    add_to_history(chat_id, "model", final_report[:800])
+                    final_report += "\n\n💡 <i>Báo cáo đang xem tạm thời trong RAM. Bấm nút <b>[💾 Lưu]</b> hoặc <b>[🔄 Thay thế]</b> bên dưới nếu sếp muốn lưu vào máy tính.</i>"
+                    markup = create_action_buttons(audit_id, is_video=is_video_audit, comparison_info=meta_info.get("comparison"), verdict=meta_info.get("verdict"))
+                    send_long_message(bot, chat_id, final_report, reply_to_message_id=message.message_id, reply_markup=markup)
 
             except PermissionError as pe:
                 safe_edit_message(
@@ -1618,9 +1715,12 @@ def setup_bot():
                     github_results=github_items
                 )
 
+                safe_edit_message(bot, chat_id, status_msg_id, "🛡️ Bot Red Team đang tự động thẩm định đối kháng...")
+                final_response, is_cancelled = autonomous_redteam_review(chat_id, text, cto_response)
+
                 if status_msg_id:
                     safe_delete_message(bot, chat_id, status_msg_id)
-                send_long_message(bot, chat_id, cto_response, reply_to_message_id=message.message_id)
+                send_long_message(bot, chat_id, final_response, reply_to_message_id=message.message_id)
 
             except PermissionError as pe:
                 safe_edit_message(

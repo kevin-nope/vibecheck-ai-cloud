@@ -15,8 +15,8 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-load_dotenv(os.path.expanduser("~/.eks/secrets/.env"))
-load_dotenv(".env")
+load_dotenv(os.path.expanduser("~/.eks/secrets/.env"), override=True)
+load_dotenv(".env", override=True)
 
 logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(message)s",
@@ -184,7 +184,7 @@ def safe_send_markdown(bot, chat_id, text, reply_to_message_id=None):
             except Exception as final_e:
                 logger.error(f"Failed to send message chunk: {final_e}")
 
-def call_gemini_redteam(chat_id, current_user_input):
+def call_gemini_redteam(chat_id, current_user_input, save_memory=True):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return (
@@ -202,16 +202,16 @@ def call_gemini_redteam(chat_id, current_user_input):
             temperature=0.3
         )
 
-        # Xây dựng danh sách Contents có bộ nhớ ngữ cảnh
-        history = memory_mgr.get_history(chat_id)
+        # Xây dựng danh sách Contents
         contents = []
+        if save_memory:
+            history = memory_mgr.get_history(chat_id)
+            for item in history:
+                role = item.get("role", "user")
+                text = item.get("text", "")
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
 
-        for item in history:
-            role = item.get("role", "user")
-            text = item.get("text", "")
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
-
-        # Thêm tin nhắn hiện tại của user
+        # Thêm tin nhắn hiện tại
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=current_user_input)]))
 
         cascade_models = [
@@ -233,8 +233,9 @@ def call_gemini_redteam(chat_id, current_user_input):
                 )
                 if res and res.text:
                     reply_text = res.text.strip()
-                    # Lưu lại lượt chat vào bộ nhớ trượt
-                    memory_mgr.add_turn(chat_id, current_user_input, reply_text)
+                    # Chỉ lưu vào bộ nhớ trượt khi được phép
+                    if save_memory:
+                        memory_mgr.add_turn(chat_id, current_user_input, reply_text)
                     return reply_text
             except Exception as ex:
                 last_err = ex
