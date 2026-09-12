@@ -1504,6 +1504,80 @@ def setup_bot():
             handle_start(message)
             return
 
+        # TẮT / BẬT NHẮC NHỞ BẰNG TIẾNG VIỆT TỰ NHIÊN
+        if any(p in clean_lower for p in ["tắt nhắc nhở", "tat nhac nho", "đừng nhắc nữa", "dung nhac nua", "tắt thông báo", "tat thong bao", "dừng nhắc nhở"]):
+            state_mgr.set_enabled(False)
+            send_long_message(bot, chat_id, "🔕 **ĐÃ TẮT TÍNH NĂNG NHẮC VIỆC TỰ ĐỘNG!**\nBot sẽ KHÔNG BAO GIỜ tự động gửi tin nhắn làm phiền anh nữa. Khi nào muốn xem danh sách việc tồn đọng, anh chỉ cần gõ `/backlog`.")
+            return
+
+        if any(p in clean_lower for p in ["bật nhắc nhở", "bat nhac nho", "mở nhắc nhở"]):
+            state_mgr.set_enabled(True)
+            send_long_message(bot, chat_id, "🔔 **ĐÃ BẬT LẠI TÍNH NĂNG NHẮC VIỆC TỰ ĐỘNG.**\nBot sẽ chỉ gửi nhắc nhở tối đa 1 task/ngày cho các việc quá hạn >12h.")
+            return
+
+        # TỰ ĐỘNG THỰC THI HÀNH ĐỘNG BACKLOG (ACTION INTENT DETECTOR):
+        # Phát hiện khi Founder ra lệnh đình chỉ/hủy/xóa/xong một task cụ thể qua tin nhắn
+        task_match = re.search(r"(TASK-\d{8}-\d+)", text, re.IGNORECASE)
+        cancel_keywords = ["đình chỉ", "dinh chi", "hủy", "huy", "hủy bỏ", "dừng", "dung", "xóa", "xoa", "cancel", "stop", "abort"]
+        done_keywords = ["làm xong", "hoàn thành", "done", "xong", "finish"]
+
+        if task_match:
+            target_task_id = task_match.group(1).upper()
+            if any(k in clean_lower for k in cancel_keywords):
+                success = backlog_mgr.cancel_task(target_task_id)
+                confirm_header = (
+                    f"🚫 **RÕ LỆNH FOUNDER: ĐÃ ĐÌNH CHỈ THÀNH CÔNG!**\n\n"
+                    f"✅ Hệ thống đã cập nhật file `00_ACTION_BACKLOG.md`:\n"
+                    f"• **Mã Task**: `{target_task_id}`\n"
+                    f"• **Trạng thái mới**: `[-] Đã đình chỉ`\n"
+                    f"• **Bảo vệ tài nguyên**: Task này đã được gỡ bỏ hoàn toàn khỏi danh sách nhắc việc tồn đọng!\n\n"
+                )
+                if len(text.strip()) > 35:
+                    reply_ctx = ""
+                    if message.reply_to_message:
+                        rt = message.reply_to_message.text or message.reply_to_message.caption or ""
+                        if rt:
+                            reply_ctx = f"=== NỘI DUNG PHẢN HỒI ===\n{rt[:2000]}\n"
+                    cto_advice = execute_cto_chat(chat_id, text, reply_context=reply_ctx)
+                    send_long_message(bot, chat_id, confirm_header + f"━━━━━━━━━━━━━━━━━━━━━━\n💡 **GHI NHẬN TỪ CTO:**\n{cto_advice}", reply_to_message_id=message.message_id)
+                else:
+                    send_long_message(bot, chat_id, confirm_header, reply_to_message_id=message.message_id)
+                return
+
+            elif any(k in clean_lower for k in done_keywords):
+                success = backlog_mgr.mark_task_completed(target_task_id)
+                send_long_message(bot, chat_id, f"✅ **RÕ LỆNH FOUNDER!** Đã đánh dấu hoàn thành `{target_task_id}` trong `00_ACTION_BACKLOG.md`!", reply_to_message_id=message.message_id)
+                return
+
+        elif any(k in clean_lower for k in cancel_keywords):
+            # Quét tìm task trong backlog khớp với tên dự án được nhắc đến
+            records, _ = BacklogParser.parse_file(BACKLOG_FILE)
+            matched_tasks = [
+                r for r in records
+                if r.is_pending and any(word in clean_lower for word in r.tool_name.lower().split() if len(word) >= 3)
+            ]
+            if len(matched_tasks) == 1:
+                target_r = matched_tasks[0]
+                backlog_mgr.cancel_task(target_r.task_id)
+                confirm_header = (
+                    f"🚫 **RÕ LỆNH FOUNDER: ĐÃ ĐÌNH CHỈ THÀNH CÔNG!**\n\n"
+                    f"✅ Hệ thống đã cập nhật file `00_ACTION_BACKLOG.md`:\n"
+                    f"• **Dự án**: {target_r.tool_name} (`{target_r.task_id}`)\n"
+                    f"• **Trạng thái mới**: `[-] Đã đình chỉ`\n"
+                    f"• **Bảo vệ tài nguyên**: Đã gỡ khỏi danh sách nhắc việc quá hạn!\n\n"
+                )
+                if len(text.strip()) > 35:
+                    reply_ctx = ""
+                    if message.reply_to_message:
+                        rt = message.reply_to_message.text or message.reply_to_message.caption or ""
+                        if rt:
+                            reply_ctx = f"=== NỘI DUNG PHẢN HỒI ===\n{rt[:2000]}\n"
+                    cto_advice = execute_cto_chat(chat_id, text, reply_context=reply_ctx)
+                    send_long_message(bot, chat_id, confirm_header + f"━━━━━━━━━━━━━━━━━━━━━━\n💡 **GHI NHẬN TỪ CTO:**\n{cto_advice}", reply_to_message_id=message.message_id)
+                else:
+                    send_long_message(bot, chat_id, confirm_header, reply_to_message_id=message.message_id)
+                return
+
         url_regex = r"(https?://[^\s<>\"']+)"
         urls = re.findall(url_regex, text)
 
@@ -1824,6 +1898,41 @@ def setup_bot():
         except Exception as e:
             send_long_message(bot, chat_id, f"⚠️ Lỗi kiểm tra trạng thái: {e}")
 
+    # Lệnh đình chỉ/hủy bỏ task nhanh (/cancel <task_id> hoặc /huy)
+    @bot.message_handler(commands=['cancel', 'huy', 'dinhchi'])
+    def handle_cancel_cmd(message):
+        chat_id = message.chat.id
+        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
+        parts = message.text.strip().split()
+        if len(parts) < 2:
+            send_long_message(bot, chat_id, "⚠️ Vui lòng nhập mã Task cần hủy/đình chỉ.\nVí dụ: `/cancel TASK-20260911-1026`")
+            return
+        target_id = parts[1].strip()
+        success = backlog_mgr.cancel_task(target_id)
+        if success:
+            send_long_message(bot, chat_id, f"🚫 **ĐÃ ĐÌNH CHỈ THÀNH CÔNG TASK `{target_id}`!**\nTask đã được chuyển sang trạng thái `[-] Đã đình chỉ` trong `00_ACTION_BACKLOG.md` và hệ thống sẽ KHÔNG BAO GIỜ nhắc nhở task này nữa.")
+        else:
+            send_long_message(bot, chat_id, f"⚠️ Không tìm thấy hoặc task `{target_id}` đã hoàn thành/hủy trước đó.")
+
+    # Lệnh bật/tắt hoặc kiểm tra nhắc nhở (/remind [on|off])
+    @bot.message_handler(commands=['remind', 'nhacnho'])
+    def handle_remind_cmd(message):
+        chat_id = message.chat.id
+        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
+        parts = message.text.strip().split()
+        if len(parts) > 1:
+            sub = parts[1].lower()
+            if sub in ["off", "tat", "tắt", "stop", "disable"]:
+                state_mgr.set_enabled(False)
+                send_long_message(bot, chat_id, "🔕 **ĐÃ TẮT TÍNH NĂNG NHẮC VIỆC TỰ ĐỘNG!**\nBot sẽ KHÔNG BAO GIỜ tự động gửi tin nhắn làm phiền anh nữa. Khi nào muốn xem danh sách việc tồn đọng, anh chỉ cần gõ `/backlog`.")
+                return
+            elif sub in ["on", "bat", "bật", "start", "enable"]:
+                state_mgr.set_enabled(True)
+                send_long_message(bot, chat_id, "🔔 **ĐÃ BẬT LẠI TÍNH NĂNG NHẮC VIỆC TỰ ĐỘNG.**\nBot sẽ gửi nhắc nhở 1 lần/ngày cho các việc quá hạn >12h.")
+                return
+
+        handle_remind_now(message)
+
     # 6. Bảng điều khiển tác vụ nhanh (/menu)
     @bot.message_handler(commands=['menu'])
     def handle_menu_cmd(message):
@@ -1901,6 +2010,17 @@ def setup_bot():
                     send_long_message(bot, call.message.chat.id, f"✅ **ĐÃ HOÀN THÀNH TASK `{task_id}`** trong `00_ACTION_BACKLOG.md`!")
                 else:
                     bot.answer_callback_query(call.id, f"⚠️ Task đã hoàn thành hoặc không tìm thấy.", show_alert=True)
+                return
+
+            # Xử lý đình chỉ/hủy bỏ task từ Backlog: cancel_{task_id}
+            if action == "cancel":
+                task_id = audit_id
+                success = backlog_mgr.cancel_task(task_id)
+                if success:
+                    bot.answer_callback_query(call.id, f"🚫 Đã đình chỉ: {task_id}!", show_alert=True)
+                    send_long_message(bot, call.message.chat.id, f"🚫 **ĐÃ ĐÌNH CHỈ & HỦY BỎ TASK `{task_id}`** trong `00_ACTION_BACKLOG.md`!\nHệ thống cam kết sẽ không bao giờ nhắc nhở task này nữa.")
+                else:
+                    bot.answer_callback_query(call.id, f"⚠️ Task đã hoàn thành/đình chỉ hoặc không tìm thấy.", show_alert=True)
                 return
 
             # Xử lý tạm hoãn nhắc nhở: snz_{task_id}

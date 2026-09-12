@@ -295,6 +295,104 @@ class BacklogManager:
                         pass
                 raise
 
+    def cancel_task(self, target_task_id: str) -> bool:
+        """
+        Critical Section:
+        Marks target_task_id status as '[-] Đã đình chỉ' atomically.
+        """
+        with BacklogFileLock(self.lock_path, timeout=8.0):
+            records, all_lines = BacklogParser.parse_file(self.backlog_path)
+            target_record = None
+            for r in records:
+                if r.task_id.lower() == target_task_id.strip().lower():
+                    target_record = r
+                    break
+
+            if not target_record:
+                logger.warning(f"Task ID '{target_task_id}' not found for cancellation.")
+                return False
+
+            orig_line = all_lines[target_record.line_number]
+            new_line = re.sub(r"(\|\s*)\[ \]\s*[^|]*(\s*\|)", r"\1[-] Đã đình chỉ\2", orig_line, count=1)
+            if new_line == orig_line:
+                new_line = orig_line.replace("[ ] Chờ làm", "[-] Đã đình chỉ").replace("[ ]", "[-] Đã đình chỉ")
+
+            all_lines[target_record.line_number] = new_line
+
+            temp_path = f"{self.backlog_path}.tmp.{uuid.uuid4().hex}"
+            try:
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    for line in all_lines:
+                        f.write(line)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                for replace_attempt in range(5):
+                    try:
+                        os.replace(temp_path, self.backlog_path)
+                        return True
+                    except PermissionError:
+                        if replace_attempt < 4:
+                            time.sleep(0.05)
+                        else:
+                            raise
+                return True
+            except Exception as e:
+                logger.error(f"Atomic replace failed in cancel_task: {e}")
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                raise
+
+    def delete_task(self, target_task_id: str) -> bool:
+        """
+        Critical Section:
+        Completely removes the task row from 00_ACTION_BACKLOG.md table atomically.
+        """
+        with BacklogFileLock(self.lock_path, timeout=8.0):
+            records, all_lines = BacklogParser.parse_file(self.backlog_path)
+            target_record = None
+            for r in records:
+                if r.task_id.lower() == target_task_id.strip().lower():
+                    target_record = r
+                    break
+
+            if not target_record:
+                logger.warning(f"Task ID '{target_task_id}' not found for deletion.")
+                return False
+
+            # Xóa dòng của task khỏi bảng
+            del all_lines[target_record.line_number]
+
+            temp_path = f"{self.backlog_path}.tmp.{uuid.uuid4().hex}"
+            try:
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    for line in all_lines:
+                        f.write(line)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                for replace_attempt in range(5):
+                    try:
+                        os.replace(temp_path, self.backlog_path)
+                        return True
+                    except PermissionError:
+                        if replace_attempt < 4:
+                            time.sleep(0.05)
+                        else:
+                            raise
+                return True
+            except Exception as e:
+                logger.error(f"Atomic replace failed in delete_task: {e}")
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                raise
+
     def get_active_tasks_summary(self) -> List[Dict[str, str]]:
         """Returns a lightweight summary of all pending tasks for LLM context matching."""
         if not os.path.exists(self.backlog_path):
@@ -590,7 +688,7 @@ class RemindedStateManager:
         self.base_dir = base_dir
         self.state_file = os.path.join(base_dir, self.FILE_NAME)
         self._lock = threading.Lock()
-        self._state = {"last_reminded": {}, "snoozed_until": {}}
+        self._state = {"last_reminded": {}, "snoozed_until": {}, "reminders_enabled": True}
         self._load()
 
     def _load(self):
@@ -602,6 +700,7 @@ class RemindedStateManager:
                     if isinstance(data, dict):
                         self._state["last_reminded"] = data.get("last_reminded", {})
                         self._state["snoozed_until"] = data.get("snoozed_until", {})
+                        self._state["reminders_enabled"] = data.get("reminders_enabled", True)
             except Exception as e:
                 logger.warning(f"Could not load reminded state: {e}. Reinitializing.")
 
@@ -615,8 +714,20 @@ class RemindedStateManager:
         except Exception as e:
             logger.error(f"Failed to save reminded state: {e}")
 
-    def should_remind(self, task_id: str, cooldown_hours: float = 12.0, now_ts: Optional[float] = None) -> bool:
+    def is_enabled(self) -> bool:
         with self._lock:
+            return self._state.get("reminders_enabled", True)
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._state["reminders_enabled"] = enabled
+            self._save()
+
+    def should_remind(self, task_id: str, cooldown_hours: float = 24.0, now_ts: Optional[float] = None) -> bool:
+        with self._lock:
+            if not self._state.get("reminders_enabled", True):
+                return False
+
             current_ts = now_ts if now_ts is not None else time.time()
             
             # Check snooze
@@ -624,7 +735,7 @@ class RemindedStateManager:
             if current_ts < snooze_until:
                 return False
 
-            # Check cooldown
+            # Check cooldown (mặc định 24 giờ chống spam)
             last_ts = self._state["last_reminded"].get(task_id, 0)
             if (current_ts - last_ts) < (cooldown_hours * 3600):
                 return False
@@ -677,7 +788,8 @@ def build_overdue_reminder_card(task: BacklogRecord) -> Tuple[str, List[Dict[str
     buttons = [
         {"text": "⚡ Prompt Antigravity", "callback_data": f"agp_{task.task_id}"},
         {"text": "✅ Đã làm xong", "callback_data": f"done_{task.task_id}"},
-        {"text": "⏸️ Tạm hoãn 24h", "callback_data": f"snz_{task.task_id}"}
+        {"text": "⏸️ Tạm hoãn 24h", "callback_data": f"snz_{task.task_id}"},
+        {"text": "🚫 Đình chỉ / Xóa task", "callback_data": f"cancel_{task.task_id}"}
     ]
     return card_text, buttons
 
@@ -702,11 +814,20 @@ def dispatch_overdue_alerts(
 
     backlog_mgr = BacklogManager(backlog_path)
     state_mgr = RemindedStateManager(base_dir)
+
+    if not force and not state_mgr.is_enabled():
+        logger.info("dispatch_overdue_alerts: Nhắc nhở tự động đang TẮT theo yêu cầu của Founder.")
+        return []
+
     overdue_tasks = backlog_mgr.get_overdue_tasks(threshold_hours=threshold_hours, now=now)
 
     alerted_ids = []
+    MAX_ALERTS_PER_CYCLE = 1 if not force else 5
     for task in overdue_tasks:
-        if force or state_mgr.should_remind(task.task_id, cooldown_hours=12.0):
+        if len(alerted_ids) >= MAX_ALERTS_PER_CYCLE:
+            break
+
+        if force or state_mgr.should_remind(task.task_id, cooldown_hours=24.0):
             card_text, buttons = build_overdue_reminder_card(task)
             
             try:
@@ -718,7 +839,8 @@ def dispatch_overdue_alerts(
                     InlineKeyboardButton(buttons[1]["text"], callback_data=buttons[1]["callback_data"])
                 )
                 markup.add(
-                    InlineKeyboardButton(buttons[2]["text"], callback_data=buttons[2]["callback_data"])
+                    InlineKeyboardButton(buttons[2]["text"], callback_data=buttons[2]["callback_data"]),
+                    InlineKeyboardButton(buttons[3]["text"], callback_data=buttons[3]["callback_data"])
                 )
                 bot.send_message(chat_id, card_text, parse_mode="HTML", reply_markup=markup)
             except Exception as e:
@@ -741,7 +863,7 @@ def start_proactive_escalation_worker(
     base_dir: str,
     check_interval_seconds: int = 1800,
     threshold_hours: float = 12.0,
-    initial_delay_seconds: int = 10
+    initial_delay_seconds: int = 300
 ) -> threading.Thread:
     """
     Launches a dedicated background daemon thread that runs periodic overdue scans.
