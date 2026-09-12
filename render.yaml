@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: vibecheck-ai-cto
+    runtime: docker
+    plan: free
+    region: singapore
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        value: 8514395299:AAEpnX4gzW-tmWYn0Cgw3jtqT_2_KhsQSoM
+      - key: GEMINI_API_KEY
+        value: AQ.Ab8RN6K1apdChvhOwImSk93zexZovS0e3s4KjkQkhhEkGJdtQw
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONIOENCODING
+        value: "utf-8"
+

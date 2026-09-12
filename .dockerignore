@@ -1,0 +1,12 @@
+.env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+bot.lock
+.reminded_state.json
+sandbox/
+tests/
+
