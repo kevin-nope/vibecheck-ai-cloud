@@ -24,5 +24,5 @@ COPY . .
 # Xóa file lock nếu lỡ bị copy vào để tránh lỗi treo bot
 RUN rm -f bot.lock
 
-# Lệnh khởi động bot ở chế độ không đệm (unbuffered)
-CMD ["python", "-u", "bot_auditor.py"]
+# Lệnh khởi động bộ điều phối Dual-Bot (launcher.py)
+CMD ["python", "-u", "launcher.py"]

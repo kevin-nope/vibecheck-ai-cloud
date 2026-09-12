@@ -77,8 +77,8 @@ state_mgr = RemindedStateManager(BASE_DIR)
 # Tải biến môi trường từ .env (override=True để file .env luôn được ưu tiên cao nhất)
 load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8514395299:AAEpnX4gzW-tmWYn0Cgw3jtqT_2_KhsQSoM")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6K1apdChvhOwImSk93zexZovS0e3s4KjkQkhhEkGJdtQw")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ==============================================================================
 # CƠ CHẾ KHÓA ĐƠN TIẾN TRÌNH (SINGLE-INSTANCE LOCK — CHỐNG LỖI 409 CONFLICT)
@@ -2025,24 +2025,25 @@ def main():
         print("\n⚠️ Thiếu GEMINI_API_KEY trong file .env hoặc biến môi trường!", flush=True)
         sys.exit(0)
 
-    # Khởi động HTTP Health Check Server cho Cloud (Render, Koyeb, Docker Web Service) một lần duy nhất
-    port = int(os.getenv("PORT", "8080"))
-    try:
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        class HealthHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(b"VibeCheck AI v3.0 Ultra is Running 24/7!")
-            def log_message(self, format, *args):
-                pass
-        health_server = HTTPServer(("0.0.0.0", port), HealthHandler)
-        t = threading.Thread(target=health_server.serve_forever, daemon=True, name="HealthCheckThread")
-        t.start()
-        print(f"✅ CLOUD HEALTH CHECK: Server HTTP đang hoạt động trên cổng {port}", flush=True)
-    except Exception as e:
-        print(f"⚠️ [HEALTH CHECK] Khởi động HTTP check: {e}", flush=True)
+    # Khởi động HTTP Health Check Server cho Cloud nếu không bị supervisor tắt
+    if os.getenv("DISABLE_INTERNAL_HEALTH_SERVER") != "1":
+        port = int(os.getenv("PORT", "8080"))
+        try:
+            from http.server import HTTPServer, BaseHTTPRequestHandler
+            class HealthHandler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/plain; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(b"VibeCheck AI v3.0 Ultra is Running 24/7!")
+                def log_message(self, format, *args):
+                    pass
+            health_server = HTTPServer(("0.0.0.0", port), HealthHandler)
+            t = threading.Thread(target=health_server.serve_forever, daemon=True, name="HealthCheckThread")
+            t.start()
+            print(f"✅ CLOUD HEALTH CHECK: Server HTTP đang hoạt động trên cổng {port}", flush=True)
+        except Exception as e:
+            print(f"⚠️ [HEALTH CHECK] Khởi động HTTP check: {e}", flush=True)
 
     # Khởi tạo BotProxy để EscalationWorker luôn trỏ đến bot instance đang hoạt động
     bot_proxy = BotProxy()
