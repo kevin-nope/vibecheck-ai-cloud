@@ -2,9 +2,12 @@
 import os
 import sys
 import time
+import json
 import logging
+import threading
+from pathlib import Path
 import telebot
-from telebot import types
+from telebot import types as tele_types
 from dotenv import load_dotenv
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -28,6 +31,10 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "8546576092")
 if not TELEGRAM_BOT_2_TOKEN:
     logger.error("THIẾU TELEGRAM_BOT_2_TOKEN! Vui lòng thiết lập trong biến môi trường hoặc .env")
 
+# Thư mục lưu trữ session đệm
+SESSIONS_DIR = Path("sessions")
+SESSIONS_DIR.mkdir(exist_ok=True)
+
 SYSTEM_PROMPT_REDTEAM = """
 BẠN LÀ TRỌNG TÀI CHIẾN LƯỢC & THỦ LĨNH RED TEAM ĐỘC LẬP (VIBECHECK REDTEAM AUDITOR).
 BẠN ĐÓNG VAI TRÒ LÀ CỐ VẤN ĐỐI KHÁNG ĐỘC LẬP CỦA FOUNDER (MR. KEVIN).
@@ -37,29 +44,107 @@ SỨ MỆNH SỐNG CÒN:
 2. MỔ XẺ, VẠCH LÁ TÌM SÂU, BÓC TÁCH BÁNH VẼ VÀ PHẢN BIỆN TÀN NHẪN.
 3. TUYỆT ĐỐI KHÔNG VUỐT VE, KHÔNG NỊNH HÓT, KHÔNG DÙNG TỪ NGỮ CHUNG CHUNG. NÓI THẲNG VÀO TỬ HUYỆT VÀ ĐIỂM NGHẼN THỰC THI!
 
-KHI NHẬN ĐƯỢC BẤT KỲ Ý TƯỞNG, BÀI ĐĂNG TIKTOK/FB/X, DEAL LÀM ĂN HOẶC ĐỀ XUẤT NÀO, HÃY XUẤT BÁO CÁO THEO CẤU TRÚC SAU:
+BỘ NHỚ & BỐI CẢNH (CONTEXT MEMORY):
+- Bạn có quyền truy cập vào các tin nhắn trước trong phiên trò chuyện.
+- Nếu Founder gửi tài liệu/dự án ở tin nhắn trước, rồi ở tin nhắn sau yêu cầu: "viết tối hậu thư", "hủy dự án nào", "tổng hợp lại": BẠN PHẢI TỰ ĐỘNG DÙNG DỮ LIỆU CỦA CẢ HAI ĐỂ THỰC THI NGAY LẬP TỨC. Tuyệt đối không nói "chưa có văn bản".
 
+CẤU TRÚC PHẢN BIỆN CHUẨN:
 🚦 BẢNG ĐÈN TÍN HIỆU:
-[Chọn DUY NHẤT 1 trong 3 trạng thái]:
-• 🔴 ĐỎ: RỦI RO CHÍ MẠNG / BÁNH VẼ / LỪA ĐẢO / CHI PHÍ ẨN PHÌNH TO (Khuyên dừng lại ngay hoặc đập đi xây lại)
-• 🟡 VÀNG: CÓ TIỀM NĂNG NHƯNG KẼ HỞ THỰC THI QUÁ LỚN (Cần bổ sung dữ liệu và bịt lỗ hổng trước khi làm)
+• 🔴 ĐỎ: RỦI RO CHÍ MẠNG / BÁNH VẼ / CHI PHÍ ẨN PHÌNH TO (Khuyên dừng lại ngay hoặc đập đi xây lại)
+• 🟡 VÀNG: CÓ TIỀM NĂNG NHƯNG KẼ HỞ THỰC THI QUÁ LỚN (Cần bịt lỗ hổng trước khi làm)
 • 🟢 XANH: KHẢ THI CAO, LOGIC CHẶT CHẼ, AN TOÀN NGUỒN LỰC (Ủng hộ triển khai)
 
-1. 🔍 BÓC TÁCH SỰ THẬT (FACT VS FICTION):
-- Dữ kiện thực tế đã kiểm chứng (Facts): ...
-- Điểm nghi vấn / Bánh vẽ / Hype Marketing (Fiction): ...
-
-2. ⚠️ 3 LỖ HỔNG CHÍ MẠNG (UNSEEN BLINDSPOTS & RISKS):
-- Lỗ hổng 1 [Tài chính / Dòng tiền / Chi phí ẩn]: ...
-- Lỗ hổng 2 [Vận hành / Rào cản kỹ thuật]: ...
-- Lỗ hổng 3 [Pháp lý / Rủi ro phụ thuộc / Thị trường]: ...
-
-3. 💡 PHƯƠNG ÁN B VƯỢT TRỘI (NEXT-BEST ALTERNATIVE):
-- Đừng chỉ chê bai. Nếu từ bỏ cách làm này, đâu là giải pháp THỰC DỤNG HƠN, RẺ HƠN, NHANH HƠN và ÍT RỦI RO HƠN?
-
-4. 🎯 HÀNH ĐỘNG DUY NHẤT TRONG 24H TỚI:
-- 1 bước kiểm chứng thực địa duy nhất Founder cần làm trước khi xuống tiền hoặc tốn công sức.
+1. 🔍 BÓC TÁCH SỰ THẬT (FACT VS FICTION)
+2. ⚠️ 3 LỖ HỔNG CHÍ MẠNG (UNSEEN BLINDSPOTS & RISKS)
+3. 💡 PHƯƠNG ÁN B VƯỢT TRỘI (NEXT-BEST ALTERNATIVE)
+4. 🎯 HÀNH ĐỘNG DUY NHẤT TRONG 24H TỚI (HOẶC VĂN BẢN YÊU CẦU ĐÌNH CHỈ / TỐI HẬU THƯ NẾU FOUNDER YÊU CẦU)
 """
+
+# ==============================================================================
+# SESSION MEMORY MANAGER (SIÊU TIẾT KIỆM TOKEN & BẢO VỆ CONTEXT)
+# ==============================================================================
+class SessionMemoryManager:
+    def __init__(self, max_turns=6, session_ttl=1800):
+        self.max_turns = max_turns  # Giữ tối đa 6 tin (3 user + 3 model)
+        self.session_ttl = session_ttl  # 30 phút không chat -> tự làm mới
+        self.sessions = {}
+        self.locks = {}
+        self._global_lock = threading.Lock()
+
+    def _get_lock(self, chat_id):
+        with self._global_lock:
+            if chat_id not in self.locks:
+                self.locks[chat_id] = threading.Lock()
+            return self.locks[chat_id]
+
+    def _get_session_file(self, chat_id):
+        return SESSIONS_DIR / f"{chat_id}.json"
+
+    def get_history(self, chat_id):
+        lock = self._get_lock(chat_id)
+        with lock:
+            if chat_id not in self.sessions:
+                s_file = self._get_session_file(chat_id)
+                if s_file.exists():
+                    try:
+                        with open(s_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        if time.time() - data.get("last_activity", 0) <= self.session_ttl:
+                            self.sessions[chat_id] = data
+                        else:
+                            s_file.unlink(missing_ok=True)
+                            self.sessions[chat_id] = {"messages": [], "last_activity": time.time()}
+                    except Exception:
+                        self.sessions[chat_id] = {"messages": [], "last_activity": time.time()}
+                else:
+                    self.sessions[chat_id] = {"messages": [], "last_activity": time.time()}
+
+            sess = self.sessions[chat_id]
+            if time.time() - sess.get("last_activity", 0) > self.session_ttl:
+                sess["messages"] = []
+            sess["last_activity"] = time.time()
+            return sess["messages"]
+
+    def add_turn(self, chat_id, user_text, model_text):
+        lock = self._get_lock(chat_id)
+        with lock:
+            if chat_id not in self.sessions:
+                self.sessions[chat_id] = {"messages": [], "last_activity": time.time()}
+            msgs = self.sessions[chat_id]["messages"]
+
+            # Cắt tỉa nếu tin nhắn quá dài để chống tràn token
+            trimmed_user = user_text[:6000] if len(user_text) > 6000 else user_text
+            trimmed_model = model_text[:6000] if len(model_text) > 6000 else model_text
+
+            msgs.append({"role": "user", "text": trimmed_user})
+            msgs.append({"role": "model", "text": trimmed_model})
+
+            # Cửa sổ trượt: Chỉ giữ tối đa max_turns tin gần nhất
+            if len(msgs) > self.max_turns:
+                msgs = msgs[-self.max_turns:]
+            self.sessions[chat_id]["messages"] = msgs
+            self.sessions[chat_id]["last_activity"] = time.time()
+
+            # Lưu vào file để chống mất trí nhớ khi server reload
+            try:
+                with open(self._get_session_file(chat_id), "w", encoding="utf-8") as f:
+                    json.dump(self.sessions[chat_id], f, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"Không thể lưu session file: {e}")
+
+    def reset(self, chat_id):
+        lock = self._get_lock(chat_id)
+        with lock:
+            self.sessions[chat_id] = {"messages": [], "last_activity": time.time()}
+            s_file = self._get_session_file(chat_id)
+            if s_file.exists():
+                try:
+                    s_file.unlink()
+                except Exception:
+                    pass
+            logger.info(f"Đã làm sạch bộ nhớ session cho chat_id: {chat_id}")
+
+memory_mgr = SessionMemoryManager(max_turns=6, session_ttl=1800)
 
 def split_text_chunks(text, max_length=3800):
     if len(text) <= max_length:
@@ -99,7 +184,7 @@ def safe_send_markdown(bot, chat_id, text, reply_to_message_id=None):
             except Exception as final_e:
                 logger.error(f"Failed to send message chunk: {final_e}")
 
-def call_gemini_redteam(user_input):
+def call_gemini_redteam(chat_id, current_user_input):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return (
@@ -117,6 +202,18 @@ def call_gemini_redteam(user_input):
             temperature=0.3
         )
 
+        # Xây dựng danh sách Contents có bộ nhớ ngữ cảnh
+        history = memory_mgr.get_history(chat_id)
+        contents = []
+
+        for item in history:
+            role = item.get("role", "user")
+            text = item.get("text", "")
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
+
+        # Thêm tin nhắn hiện tại của user
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=current_user_input)]))
+
         cascade_models = [
             "gemini-3.5-flash-lite",
             "gemini-3.5-flash",
@@ -131,11 +228,14 @@ def call_gemini_redteam(user_input):
             try:
                 res = client.models.generate_content(
                     model=m,
-                    contents=user_input,
+                    contents=contents,
                     config=config
                 )
                 if res and res.text:
-                    return res.text.strip()
+                    reply_text = res.text.strip()
+                    # Lưu lại lượt chat vào bộ nhớ trượt
+                    memory_mgr.add_turn(chat_id, current_user_input, reply_text)
+                    return reply_text
             except Exception as ex:
                 last_err = ex
                 logger.warning(f"Model {m} fallback: {ex}")
@@ -161,18 +261,44 @@ def create_bot():
             return
 
         welcome_text = (
-            "🛡️ **VIBECHECK REDTEAM | TRỌNG TÀI PHẢN BIỆN ĐỘC LẬP**\n\n"
-            "Tôi là Cố vấn Đối kháng (Adversarial Checker) chạy ngầm trên Cloud 24/7.\n\n"
+            "🛡️ **VIBECHECK REDTEAM | TRỌNG TÀI PHẢN BIỆN ĐỘC LẬP (v3.1 STATEFUL)**\n\n"
+            "Tôi là Cố vấn Đối kháng chạy ngầm trên Cloud 24/7 với **Bộ nhớ Ngữ cảnh Siêu Tiết Kiệm Token**.\n\n"
             "📌 **Sứ mệnh:**\n"
             "• Chuyên 'vạch lá tìm sâu', bóc trần bánh vẽ và các chi phí ẩn.\n"
             "• Thẩm định chéo câu trả lời của Bot 1 (Maker / CTO).\n"
-            "• Fact-check video TikTok, bài viết Facebook, tin tức X, đề xuất kinh doanh.\n\n"
-            "👉 **Cách dùng:**\n"
-            "1. Chuyển tiếp (Forward) bất kỳ tin nhắn/ý tưởng nào từ Bot 1 sang đây.\n"
-            "2. Hoặc dán link/nội dung từ TikTok, Facebook, X, đối tác vào đây.\n"
-            "Tôi sẽ lập tức xuất Bảng Đèn Tín Hiệu + 3 Lỗ Hổng Chí Mạng + Phương Án B Tối Ưu!"
+            "• Ghi nhớ mạch hội thoại liên tục, không bao giờ bắt Founder lặp lại dữ liệu!\n\n"
+            "👉 **Các lệnh điều khiển:**\n"
+            "• `/new` hoặc `/reset`: Xóa sạch ngữ cảnh cũ để bắt đầu thẩm định một vụ việc hoàn toàn mới.\n"
+            "• `/verdict`: Yêu cầu xuất ngay Bản Tối Hậu Thư / Quyết định đình chỉ dự án dựa trên những gì vừa bàn."
         )
         safe_send_markdown(bot, message.chat.id, welcome_text)
+
+    @bot.message_handler(commands=['new', 'reset', 'clear'])
+    def handle_reset_session(message):
+        chat_id = str(message.chat.id)
+        if ADMIN_CHAT_ID and chat_id != str(ADMIN_CHAT_ID):
+            return
+        memory_mgr.reset(message.chat.id)
+        bot.reply_to(message, "🧹 **BỘ NHỚ ĐÃ ĐƯỢC LÀM SẠCH 100%!**\n\nTôi đã đóng hồ sơ cũ và mở một trang giấy trắng. Token tiêu thụ đã về 0. Bạn hãy gửi vụ việc mới vào đây!")
+
+    @bot.message_handler(commands=['verdict', 'toihauthu'])
+    def handle_verdict_command(message):
+        chat_id = str(message.chat.id)
+        if ADMIN_CHAT_ID and chat_id != str(ADMIN_CHAT_ID):
+            return
+        prompt_command = "Dựa trên toàn bộ dữ liệu và các dự án chúng ta vừa trao đổi, hãy xuất ngay một 'VĂN BẢN TỐI HẬU THƯ / QUYẾT ĐỊNH ĐÌNH CHỈ' (Termination Notice) thật sắc bén, quyết đoán, nêu rõ lý do hủy dự án nào và yêu cầu CTO dừng ngay lập tức."
+        status_msg = bot.reply_to(message, "⏳ [Red Team] Đang rà soát toàn bộ lịch sử vụ việc & soạn thảo Tối Hậu Thư...")
+        try:
+            bot.send_chat_action(message.chat.id, 'typing')
+            analysis_result = call_gemini_redteam(message.chat.id, prompt_command)
+            try:
+                bot.delete_message(message.chat.id, status_msg.message_id)
+            except Exception:
+                pass
+            safe_send_markdown(bot, message.chat.id, analysis_result, reply_to_message_id=message.message_id)
+        except Exception as e:
+            logger.error(f"Verdict error: {e}")
+            bot.send_message(message.chat.id, f"⚠️ Lỗi soạn thảo phán quyết: {e}")
 
     @bot.message_handler(func=lambda msg: True, content_types=['text', 'photo'])
     def handle_audit_request(message):
@@ -186,10 +312,10 @@ def create_bot():
             bot.reply_to(message, "⚠️ Vui lòng gửi nội dung văn bản hoặc link bài viết để tôi tiến hành thẩm định phản biện.")
             return
 
-        status_msg = bot.reply_to(message, "⏳ [Red Team] Đang mổ xẻ dữ liệu & truy quét lỗ hổng chí mạng...")
+        status_msg = bot.reply_to(message, "⏳ [Red Team] Đang kết nối bộ nhớ ngữ cảnh & mổ xẻ dữ liệu...")
         try:
             bot.send_chat_action(message.chat.id, 'typing')
-            analysis_result = call_gemini_redteam(user_content)
+            analysis_result = call_gemini_redteam(message.chat.id, user_content)
 
             try:
                 bot.delete_message(message.chat.id, status_msg.message_id)
@@ -212,7 +338,7 @@ def create_bot():
     return bot
 
 def run_redteam_bot_loop():
-    logger.info("🚀 KHỞI CHẠY VIBECHECK REDTEAM BOT (POLLING MODE)...")
+    logger.info("🚀 KHỞI CHẠY VIBECHECK REDTEAM BOT STATEFUL (POLLING MODE)...")
     while True:
         try:
             bot = create_bot()
