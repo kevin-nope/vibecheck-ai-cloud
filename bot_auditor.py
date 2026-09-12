@@ -40,9 +40,14 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Cấu hình timeout bền bỉ cho kết nối Telegram API
+# Cấu hình timeout bền bỉ & tự động retry đa tầng cho kết nối Telegram API
+apihelper.RETRY_ON_ERROR = True
+apihelper.RETRY_ENGINE = 2  # Sử dụng HTTPAdapter với urllib3 Retry tự phục hồi
+apihelper.MAX_RETRIES = 15
+apihelper.RETRY_TIMEOUT = 2
 apihelper.READ_TIMEOUT = 90
 apihelper.CONNECT_TIMEOUT = 30
+apihelper.LONG_POLLING_TIMEOUT = 20
 
 # ==============================================================================
 # CẤU HÌNH HỆ THỐNG VIBECHECK AI (V2.2 ENTERPRISE GRADE)
@@ -90,7 +95,7 @@ def acquire_single_instance_lock():
                     if old_pid != current_pid:
                         # Diệt tiến trình cũ trên Windows nếu còn chạy ngầm
                         os.system(f"taskkill /PID {old_pid} /F >nul 2>&1")
-                        time.sleep(1)
+                        time.sleep(2.5)  # Chờ để Telegram server giải phóng socket getUpdates cũ
         except Exception:
             pass
     try:
@@ -100,10 +105,14 @@ def acquire_single_instance_lock():
         pass
 
 def cleanup_lock():
-    """Tự động xóa file khóa khi tắt bot."""
+    """Tự động xóa file khóa khi tắt bot (chỉ xóa nếu đúng là file do tiến trình hiện tại tạo)."""
     try:
+        current_pid = os.getpid()
         if os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
+            with open(LOCK_FILE, "r") as f:
+                content = f.read().strip()
+            if content == str(current_pid):
+                os.remove(LOCK_FILE)
     except Exception:
         pass
 
@@ -1019,13 +1028,42 @@ class ResilientExceptionHandler(telebot.ExceptionHandler):
     Bộ xử lý ngoại lệ trung tâm cho pyTelegramBotAPI.
     Đảm bảo:
     1. Không một ngoại lệ luồng worker nào có thể làm sập hoặc thoát luồng polling chính.
-    2. Ghi nhận lỗi chi tiết vào console để debug mà không gián đoạn dịch vụ 24/7.
+    2. Phân loại lỗi mạng thông thường (Read timed out, Connection reset) để tự động duy trì kết nối.
+    3. Ghi nhận lỗi chi tiết vào console để debug mà không gián đoạn dịch vụ 24/7.
     """
     def handle(self, exception):
-        print(f"⚠️ [RESILIENT HANDLER] Đã bắt ngoại lệ luồng Telegram an toàn: {exception}", flush=True)
+        exc_str = str(exception)
+        # Xử lý xung đột phiên 409
+        if "409" in exc_str or "conflict" in exc_str.lower():
+            print(f"⚠️ [CONFLICT 409] Phiên Telegram khác vừa ngắt kết nối. Đang duy trì kết nối an toàn...", flush=True)
+            time.sleep(3)
+            return True
+        # Các sự cố socket/timeout tạm thời là bình thường khi long-polling làm mới kết nối
+        if any(term in exc_str.lower() for term in ["read timed out", "connection reset", "remotedisconnected", "timeout"]):
+            print(f"ℹ️ [NETWORK] Đang tự động làm mới luồng polling Telegram: {exc_str[:120]}...", flush=True)
+        else:
+            print(f"⚠️ [RESILIENT HANDLER] Đã bắt ngoại lệ luồng Telegram an toàn: {exception}", flush=True)
         # Trả về True để báo cho telebot biết ngoại lệ đã được xử lý thành công
         # Ngăn chặn telebot gọi polling_thread.stop()
         return True
+
+
+class BotProxy:
+    """
+    Proxy an toàn đại diện cho instance Telegram Bot hiện hành.
+    Cho phép các worker ngầm (như EscalationWorker) luôn gọi bot đang hoạt động
+    kể cả khi supervisor loop tái tạo phiên bot mới sau khi rớt mạng.
+    """
+    def __init__(self, bot=None):
+        self._bot = bot
+
+    def set_bot(self, bot):
+        self._bot = bot
+
+    def __getattr__(self, name):
+        if self._bot is None:
+            raise RuntimeError("BotProxy chưa được liên kết với instance bot thực tế nào.")
+        return getattr(self._bot, name)
 
 
 # ==============================================================================
@@ -1938,94 +1976,91 @@ def main():
         print("\n⚠️ Thiếu GEMINI_API_KEY trong file .env hoặc biến môi trường!", flush=True)
         sys.exit(0)
 
-    print("\n[+] Khởi tạo kết nối VibeCheck AI Telegram Bot v2.8.0...", flush=True)
+    # Khởi động HTTP Health Check Server cho Cloud (Render, Koyeb, Docker Web Service) một lần duy nhất
+    port = int(os.getenv("PORT", "8080"))
     try:
-        bot = setup_bot()
-        bot_info = bot.get_me()
-        print(f"✅ KẾT NỐI THÀNH CÔNG: @{bot_info.username} ({bot_info.first_name})", flush=True)
-        print("✅ SINGLE-INSTANCE LOCK: Đã kích hoạt bot.lock (Không còn lỗi 409 Conflict)", flush=True)
-        print("✅ AUTO-RETRY & MULTI-MODEL CASCADE: 6 models (gemini-3.5-flash-lite ➡️ gemini-3.5-flash ➡️ gemini-flash-lite ➡️ gemini-flash ➡️ gemini-3.7-flash ➡️ gemini-3.6-flash)", flush=True)
-        print("✅ ON-DEMAND LOCAL PERSISTENCE: Không tự động lưu file, chỉ lưu khi người dùng bấm nút", flush=True)
-        print("✅ 1V1 SUPERSEDING MATRIX & DEDUP: Tự đối chiếu Backlog, chống trùng lặp, gợi ý thay thế 1-chạm", flush=True)
-        print("✅ ZERO-FOOTPRINT MEMORY & DISK: Tự hủy mọi buffer video/audio/photo sau xử lý (RAM <45MB)", flush=True)
-        print("✅ TRIPLE-TIER COMMAND MENU: Đã đăng ký native [/] menu + bàn phím nổi 4 phím + /menu dashboard", flush=True)
-        print("✅ MASTER ACTION BACKLOG (/backlog): Đồng bộ hai chiều với 00_ACTION_BACKLOG.md", flush=True)
-        print("✅ PROACTIVE OVERDUE ESCALATION (/remind_now): Tự động nhắc việc tồn đọng >12h với nút bấm", flush=True)
-        print("✅ ANTIGRAVITY IDE (0 ĐỒNG): Tối ưu hóa 100% cho Gemini Pro 18 tháng & Pair-Programming", flush=True)
-        print("✅ BẢO VỆ ĐA LUỒNG & RAM: LRU Cache (Max 50 items) + Thread Lock", flush=True)
-        print("✅ CHUẨN HÓA TELEGRAM HTML: In đậm, in nghiêng, hyperlink sạch, tắt preview banner", flush=True)
-
-        # Khởi động HTTP Health Check Server cho Cloud (Render, Koyeb, Docker Web Service)
-        def start_cloud_health_server():
-            port = int(os.getenv("PORT", "8080"))
-            from http.server import HTTPServer, BaseHTTPRequestHandler
-            class HealthHandler(BaseHTTPRequestHandler):
-                def do_GET(self):
-                    self.send_response(200)
-                    self.send_header('Content-type', 'text/plain; charset=utf-8')
-                    self.end_headers()
-                    self.wfile.write(b"VibeCheck AI v3.0 Ultra is Running 24/7!")
-                def log_message(self, format, *args):
-                    pass
-            try:
-                server = HTTPServer(("0.0.0.0", port), HealthHandler)
-                t = threading.Thread(target=server.serve_forever, daemon=True)
-                t.start()
-                print(f"✅ CLOUD HEALTH CHECK: Server HTTP đang hoạt động trên cổng {port}", flush=True)
-            except Exception as e:
-                print(f"⚠️ [HEALTH CHECK] Khởi động HTTP check: {e}", flush=True)
-
-        start_cloud_health_server()
-
-        # 3. Kích hoạt luồng quét nhắc việc tự động chạy ngầm (Proactive Escalation Worker)
-        start_proactive_escalation_worker(
-            bot=bot,
-            backlog_path=BACKLOG_FILE,
-            base_dir=BASE_DIR,
-            check_interval_seconds=1800,
-            threshold_hours=12.0,
-            initial_delay_seconds=10
-        )
-        print("✅ PROACTIVE ESCALATION DAEMON: Đã kích hoạt luồng quét ngầm nhắc việc quá hạn (12h threshold / 30min cycle)", flush=True)
-
-        print("\n🚀 VibeCheck AI v2.8.0 đang chạy ổn định... (Nhấn Ctrl+C để dừng)\n", flush=True)
-
-        consecutive_failures = 0
-        while True:
-            try:
-                # Đảm bảo cờ stop_polling không bị giữ lại từ vòng lặp trước
-                if hasattr(bot, "_TeleBot__stop_polling"):
-                    getattr(bot, "_TeleBot__stop_polling").clear()
-
-                bot.infinity_polling(timeout=40, long_polling_timeout=25, restart_on_change=False)
-                # Nếu infinity_polling thoát ra mà không có ngoại lệ, nghỉ 1s rồi tiếp tục
-                time.sleep(1)
-            except telebot.apihelper.ApiTelegramException as e:
-                err_code = getattr(e, "error_code", None)
-                print(f"\n⚠️ Telegram API Exception (code {err_code}): {e}", flush=True)
-                if err_code in [401, 404]:
-                    print("❌ Token không hợp lệ. Dừng bot.", flush=True)
-                    break
-                time.sleep(5)
-            except Exception as e:
-                consecutive_failures += 1
-                delay = min(30, 2 * consecutive_failures)
-                print(f"⚠️ [POLLING SUPERVISOR] Lỗi kết nối polling ({e}). Tự phục hồi sau {delay}s...", flush=True)
-                time.sleep(delay)
-                # Nếu lỗi mạng kéo dài hoặc đứt session, tái tạo bot instance mới
-                if consecutive_failures >= 5:
-                    try:
-                        bot.stop_polling()
-                    except Exception:
-                        pass
-                    try:
-                        bot = setup_bot()
-                        consecutive_failures = 0
-                        print("🔄 [POLLING SUPERVISOR] Đã tái tạo phiên kết nối Telegram Bot mới thành công!", flush=True)
-                    except Exception as re_err:
-                        print(f"Lỗi tái tạo bot: {re_err}", flush=True)
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(b"VibeCheck AI v3.0 Ultra is Running 24/7!")
+            def log_message(self, format, *args):
+                pass
+        health_server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        t = threading.Thread(target=health_server.serve_forever, daemon=True, name="HealthCheckThread")
+        t.start()
+        print(f"✅ CLOUD HEALTH CHECK: Server HTTP đang hoạt động trên cổng {port}", flush=True)
     except Exception as e:
-        print(f"\n❌ Lỗi khởi động: {e}", flush=True)
+        print(f"⚠️ [HEALTH CHECK] Khởi động HTTP check: {e}", flush=True)
+
+    # Khởi tạo BotProxy để EscalationWorker luôn trỏ đến bot instance đang hoạt động
+    bot_proxy = BotProxy()
+    start_proactive_escalation_worker(
+        bot=bot_proxy,
+        backlog_path=BACKLOG_FILE,
+        base_dir=BASE_DIR,
+        check_interval_seconds=1800,
+        threshold_hours=12.0,
+        initial_delay_seconds=10
+    )
+    print("✅ PROACTIVE ESCALATION DAEMON: Đã kích hoạt luồng quét ngầm nhắc việc quá hạn (12h threshold / 30min cycle)", flush=True)
+
+    # ==============================================================================
+    # VÒNG LẶP GIÁM SÁT BẤT TỬ (IMMORTAL SUPERVISOR POLLING LOOP)
+    # ==============================================================================
+    consecutive_failures = 0
+    while True:
+        bot = None
+        try:
+            print("\n[+] Khởi tạo kết nối VibeCheck AI Telegram Bot v2.8.0...", flush=True)
+            bot = setup_bot()
+            bot_proxy.set_bot(bot)
+            bot_info = bot.get_me()
+            print(f"✅ KẾT NỐI THÀNH CÔNG: @{bot_info.username} ({bot_info.first_name})", flush=True)
+            print("✅ SINGLE-INSTANCE LOCK: Đã kích hoạt bot.lock (Không còn lỗi 409 Conflict)", flush=True)
+            print("✅ AUTO-RETRY & MULTI-MODEL CASCADE: 6 models (gemini-3.5-flash-lite ➡️ gemini-3.5-flash ➡️ gemini-flash-lite ➡️ gemini-flash ➡️ gemini-3.7-flash ➡️ gemini-3.6-flash)", flush=True)
+            print("✅ ON-DEMAND LOCAL PERSISTENCE: Không tự động lưu file, chỉ lưu khi người dùng bấm nút", flush=True)
+            print("✅ 1V1 SUPERSEDING MATRIX & DEDUP: Tự đối chiếu Backlog, chống trùng lặp, gợi ý thay thế 1-chạm", flush=True)
+            print("✅ ZERO-FOOTPRINT MEMORY & DISK: Tự hủy mọi buffer video/audio/photo sau xử lý (RAM <45MB)", flush=True)
+            print("✅ TRIPLE-TIER COMMAND MENU: Đã đăng ký native [/] menu + bàn phím nổi 4 phím + /menu dashboard", flush=True)
+            print("✅ MASTER ACTION BACKLOG (/backlog): Đồng bộ hai chiều với 00_ACTION_BACKLOG.md", flush=True)
+            print("✅ PROACTIVE OVERDUE ESCALATION (/remind_now): Tự động nhắc việc tồn đọng >12h với nút bấm", flush=True)
+            print("✅ ANTIGRAVITY IDE (0 ĐỒNG): Tối ưu hóa 100% cho Gemini Pro 18 tháng & Pair-Programming", flush=True)
+            print("✅ BẢO VỆ ĐA LUỒNG & RAM: LRU Cache (Max 50 items) + Thread Lock", flush=True)
+            print("✅ CHUẨN HÓA TELEGRAM HTML: In đậm, in nghiêng, hyperlink sạch, tắt preview banner", flush=True)
+            print("\n🚀 VibeCheck AI v2.8.0 đang chạy ổn định 24/7... (Nhấn Ctrl+C để dừng)\n", flush=True)
+
+            consecutive_failures = 0
+            # timeout=90, long_polling_timeout=20: Telegram nhả socket sau 20s, client timeout tới 90s, loại trừ 100% lỗi ReadTimeout giả lập
+            bot.infinity_polling(timeout=90, long_polling_timeout=20, restart_on_change=False)
+            print("⚠️ [SUPERVISOR] Phiên polling Telegram vừa kết thúc bình thường. Đang tái tạo phiên mới sau 2s...", flush=True)
+            time.sleep(2)
+        except telebot.apihelper.ApiTelegramException as e:
+            err_code = getattr(e, "error_code", None)
+            print(f"\n⚠️ Telegram API Exception (code {err_code}): {e}", flush=True)
+            if err_code in [401, 404]:
+                print("❌ Token không hợp lệ. Vui lòng kiểm tra lại TELEGRAM_BOT_TOKEN trong .env!", flush=True)
+                time.sleep(15)
+            elif err_code == 409:
+                print("⚠️ [CONFLICT 409] Phiên polling Telegram bị xung đột tạm thời. Đang chờ 5s để tái kết nối độc quyền...", flush=True)
+                time.sleep(5)
+            else:
+                time.sleep(5)
+        except (KeyboardInterrupt, SystemExit):
+            print("\n🛑 Nhận tín hiệu dừng tiến trình. Đang dọn dẹp và thoát an toàn...", flush=True)
+            if bot:
+                try:
+                    bot.stop_polling()
+                except Exception:
+                    pass
+            break
+        except Exception as e:
+            consecutive_failures += 1
+            delay = min(30, 3 * consecutive_failures)
+            print(f"⚠️ [POLLING SUPERVISOR] Sự cố kết nối ({e}). Tự động phục hồi sau {delay}s (Lần thử {consecutive_failures})...", flush=True)
+            time.sleep(delay)
 
 
 if __name__ == "__main__":
