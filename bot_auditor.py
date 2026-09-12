@@ -1225,6 +1225,8 @@ def setup_bot():
                 safe_delete_message(bot, chat_id, status_msg_id)
             markup = create_action_buttons(audit_id, is_video=False, comparison_info=meta_info.get("comparison"), verdict=meta_info.get("verdict"))
             send_long_message(bot, chat_id, clean_report, reply_to_message_id=message.message_id, reply_markup=markup)
+        except PermissionError as pe:
+            safe_edit_message(bot, chat_id, status_msg_id, f"❌ <b>LỖI XÁC THỰC AI:</b>\n{pe}")
         except Exception as e:
             print(f"❌ Lỗi xử lý Photo: {e}", flush=True)
             safe_edit_message(bot, chat_id, status_msg_id, "⚠️ Máy chủ AI đang bận tạm thời. Anh vui lòng thử lại sau vài giây nhé!")
@@ -1275,6 +1277,8 @@ def setup_bot():
                 safe_delete_message(bot, chat_id, status_msg_id)
             markup = create_action_buttons(audit_id, is_video=False, comparison_info=meta_info.get("comparison"), verdict=meta_info.get("verdict"))
             send_long_message(bot, chat_id, clean_report, reply_to_message_id=message.message_id, reply_markup=markup)
+        except PermissionError as pe:
+            safe_edit_message(bot, chat_id, status_msg_id, f"❌ <b>LỖI XÁC THỰC AI:</b>\n{pe}")
         except Exception as e:
             print(f"❌ Lỗi xử lý Document: {e}", flush=True)
             safe_edit_message(bot, chat_id, status_msg_id, "⚠️ Máy chủ AI đang bận xử lý file. Anh vui lòng gửi lại sau vài giây!")
