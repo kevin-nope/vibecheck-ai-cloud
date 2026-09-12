@@ -256,13 +256,13 @@ QUY TRÌNH REFLEXION 3 BƯỚC:
      * Phương án A (Lean / 0đ / Tốc độ cao): Cách giải quyết bài toán đó nhanh nhất, tốn 0đ hoặc siêu rẻ, ít rủi ro nhất.
      * Phương án B (Công nghệ chuẩn công nghiệp / Mở rộng lâu dài): Lựa chọn kiến trúc bền vững, mã nguồn mở hoặc giải pháp thay thế hàng đầu thị trường.
 
-QUY CHUẨN TRÌNH BÀY ĐẦU RA (Markdown chuẩn Telegram):
+QUY CHUẨN TRÌNH BÀY ĐẦU RA (Markdown chuẩn Telegram - Tối ưu đọc lướt trên điện thoại):
 - Dòng 1: KẾT LUẬN CỐT LÕI (Dứt khoát, kèm Đèn tín hiệu 🟢 / 🟡 / 🔴).
-- Thân bài:
-  + Bóc tách kỹ thuật & Bảng đối chiếu Hype vs Thực tế.
-  + ⚠️ 3 LỖ HỔNG & RỦI RO TIỀM ẨN (Điểm mù do vòng Reflexion phát hiện).
-  + 💡 PHƯƠNG ÁN THAY THẾ TỐI ƯU VƯỢT TRỘI (Phương án Lean 0đ vs Phương án chuẩn).
-  + Ứng dụng thực tế theo bối cảnh (Nếu liên quan Xe Thành Tâm thì phân tích rõ, nếu là ngành khác thì phân tích theo ngành đó).
+- Thân bài (Tối đa 15-20 dòng ngắn gọn, không viết văn xuôi dài dòng):
+  + 🔍 BẢN CHẤT KỸ THUẬT & HYPE VS REALITY (Tối đa 3-4 gạch đầu dòng).
+  + ⚠️ 2-3 LỖ HỔNG CHÍ MẠNG (Điểm mù do vòng Reflexion phát hiện).
+  + 💡 PHƯƠNG ÁN B (0Đ) TỐI ƯU VƯỢT TRỘI (Cách làm rẻ nhất, ít rủi ro nhất).
+  + Ứng dụng thực tế (Nếu liên quan Xe Thành Tâm thì phân tích rõ, nếu ngành khác phân tích theo ngành đó).
 - Dòng cuối: BẮT BUỘC có đúng 1 Routing Tag: [TRIỂN KHAI NGAY] hoặc [LƯU THAM KHẢO] hoặc [BỎ QUA/HYPE].
 
 BẮT BUỘC KÈM 2 KHỐI DỮ LIỆU ĐẶC BIỆT Ở CUỐI CÙNG:
@@ -286,22 +286,20 @@ COMPARISON_VERDICT: [1 câu nhận định so sánh trực diện]
 """
 
 SYSTEM_PROMPT_CTO_CHAT = """Bạn là VibeCheck AI – CTO thực chiến & Senior Tech Architect.
-Người dùng đang đặt câu hỏi tiếp nối (follow-up Q&A), nhờ tư vấn giải pháp, tìm kiếm công cụ/repo, nhờ viết code, hoặc hỏi sâu về báo cáo kỹ thuật trước đó.
+Người dùng đang đặt câu hỏi tiếp nối (follow-up Q&A), nhờ tư vấn giải pháp, tìm kiếm công cụ/repo, nhờ viết code, hoặc hỏi sâu về kỹ thuật.
 
-I. NGUYÊN TẮC NỘI DUNG (BẮT BUỘC):
-1. ĐI THẲNG VÀO VẤN ĐỀ: Trả lời trực diện câu hỏi của người dùng, súc tích (dưới 20 dòng). Tuyệt đối KHÔNG vòng vo, KHÔNG giảng đạo lý thuyết.
-2. KHÔNG ÉP KHUÔN 5 TRỤ CỘT & KHÔNG GẮN ROUTING TAG: Đây là phiên thảo luận/cố vấn, không phải báo cáo thẩm định mới. Tuyệt đối không gắn [TRIỂN KHAI NGAY] hay [LƯU THAM KHẢO] trừ khi người dùng yêu cầu rõ ràng.
-3. TƯ VẤN REPO & CÔNG NGHỆ THỰC CHIẾN:
-   - Dựa trên dữ liệu GitHub Search thực tế được cung cấp để giới thiệu 2 đến 4 giải pháp tốt nhất.
-   - Luôn đưa ra kết luận dứt khoát: Khuyên người dùng nên chọn cái nào nhất (ưu tiên giải pháp 0đ, nhẹ, dễ tích hợp).
-
-II. NGUYÊN TẮC TRÌNH BÀY & NHẤN NHÁ THỊ GIÁC (RẤT QUAN TRỌNG):
-- IN ĐẬM: Dùng **từ khóa** cho Tên công cụ, số sao ⭐ (ví dụ: ⭐ **78k**), chi phí (**0đ**), và hành động quyết định. Chỉ in đậm từ khóa quan trọng (tối đa 20% câu chữ), tuyệt đối KHÔNG in đậm cả câu dài.
-- IN NGHIÊNG: Dùng *từ khóa* cho ưu/nhược điểm, lưu ý kỹ thuật, hoặc giải nghĩa nhỏ.
-- CODE: Dùng `owner/repo` cho tên repo, tên file, hoặc lệnh cài đặt.
-- HYPERLINK SẠCH: BẮT BUỘC dùng link ẩn dạng [Tên Repo](URL). TUYỆT ĐỐI KHÔNG để trần link URL thô dài ngoằng làm vỡ khung chat.
-- TRÍCH DẪN CTO: Dùng dấu > ở đầu và cuối để đóng khung lời khuyên chốt hạ hoặc góc nhìn CTO.
-- CẤU TRÚC PHẲNG: Dùng gạch đầu dòng 1 cấp ngắn gọn, câu từ gãy gọn. TUYỆT ĐỐI KHÔNG lồng nhiều tầng dấu hoa thị (* *Ưu*:) gây rối mắt.
+QUY CHUẨN TRÌNH BÀY MOBILE-FIRST (BẮT BUỘC - ĐỌC LƯỚT DƯỚI 15 GIÂY TRÊN ĐIỆN THOẠI):
+1. ĐỘ DÀI: Tối đa 10 - 15 dòng ngắn. Tuyệt đối KHÔNG chào hỏi xã giao, KHÔNG viết đoạn văn dài quá 2 câu, KHÔNG giảng giải lý thuyết dông dài.
+2. CẤU TRÚC 3 PHẦN THỰC DỤNG:
+   - 🎯 GIẢI PHÁP CỐT LÕI: 1-2 câu trả lời thẳng vào bài toán.
+   - 🛠️ CÔNG NGHỆ/REPO ĐỀ XUẤT: 1 đến 2 lựa chọn tốt nhất (ưu tiên 0đ, nhẹ, ổn định), kèm link dạng [Tên Repo](URL) và số star ⭐ nếu có.
+   - ⚡ HÀNH ĐỘNG NGAY: 2-3 gạch đầu dòng các bước triển khai cụ thể, thực chiến.
+3. BẢO VỆ DÒNG TIỀN & CHỐNG OVER-ENGINEERING:
+   - Nếu liên quan Web Booking/Nhà xe: Luôn giữ nguyên tắc 0đ, ổn định tuyệt đối, không làm phức tạp hóa.
+4. NHẤN NHÁ THỊ GIÁC:
+   - In đậm **từ khóa quan trọng** ngay đầu dòng (Tên tool, Giá tiền 0đ, Hành động).
+   - Tuyệt đối KHÔNG in đậm cả câu dài, KHÔNG lồng nhiều tầng ký tự.
+   - Trích dẫn CTO ở cuối: Dùng > cho đúng 1 câu đúc kết sắc bén (tối đa 2 dòng).
 """
 
 # ==============================================================================
@@ -853,11 +851,13 @@ def autonomous_redteam_review(chat_id: int, user_request: str, cto_output: str) 
 
         prompt_to_redteam = (
             f"FOUNDER KEVIN YÊU CẦU / DỮ LIỆU ĐẦU VÀO:\n{clean_user_input}\n\n"
-            f"CTO ĐÃ ĐỀ XUẤT PHƯƠNG ÁN / THẨM ĐỊNH:\n{clean_cto_output}\n\n"
-            "Là Thủ Lĩnh Red Team Độc Lập: Hãy thẩm định đối kháng xem ý tưởng/công nghệ/dự án này có đáng làm không. "
-            "BẬT ĐÈN TÍN HIỆU (🔴 ĐỎ / 🟡 VÀNG / 🟢 XANH). "
-            "Nếu cờ ĐỎ (rủi ro chí mạng, bánh vẽ, lừa đảo, hoặc đốt tiền vô ích): Ra lệnh cho CTO HỦY BỎ DỰ ÁN NGAY LẬP TỨC và nêu rõ 3 lý do chí mạng!\n"
-            "Nếu cờ VÀNG hoặc XANH: Nêu rõ lưu ý phản biện và phương án B tối ưu nhất cho Founder."
+            f"CTO ĐÃ ĐỀ XUẤT PHƯƠNG ÁN:\n{clean_cto_output}\n\n"
+            "Là Thủ Lĩnh Red Team Độc Lập: Hãy thẩm định đối kháng SIÊU NGẮN GỌN để Founder đọc lướt trên điện thoại (TỐI ĐA 4-6 DÒNG).\n"
+            "Định dạng bắt buộc:\n"
+            "🚦 ĐÈN TÍN HIỆU: [🔴 ĐỎ (Hủy ngay) | 🟡 VÀNG (Cân nhắc) | 🟢 XANH (Duyệt)] - [1 câu kết luận dứt khoát]\n"
+            "⚠️ TỬ HUYỆT/RỦI RO: [Tối đa 2 gạch đầu dòng ngắn, chỉ thẳng rủi ro lớn nhất]\n"
+            "💡 LƯU Ý/PHƯƠNG ÁN (0Đ): [1 gạch đầu dòng giải pháp an toàn hoặc lệnh đình chỉ]\n"
+            "Tuyệt đối không viết văn dài, không giảng đạo lý thuyết!"
         )
         
         redteam_verdict = call_gemini_redteam(chat_id, prompt_to_redteam, save_memory=False)
@@ -867,28 +867,22 @@ def autonomous_redteam_review(chat_id: int, user_request: str, cto_output: str) 
         if is_red:
             pop_last_history_turn(chat_id)
             combined = (
-                f"🚦 **KẾT LUẬN LIÊN ĐOÀN: 🔴 ĐÃ TỰ ĐỘNG HỦY BỎ (PROJECT CANCELLED)**\n"
-                f"*(Red Team đã can thiệp ngầm, phát hiện rủi ro chí mạng và ra lệnh CTO đình chỉ ngay lập tức)*\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"💡 **1. ĐỀ XUẤT BAN ĐẦU CỦA CTO:**\n"
-                f"{cto_output}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🛡️ **2. ĐÒN PHẢN BIỆN & LỆNH HỦY TỪ RED TEAM:**\n"
+                f"🚦 **KẾT LUẬN LIÊN ĐOÀN: 🔴 ĐÃ TỰ HỦY BỎ**\n"
+                f"*(Red Team can thiệp ngầm, phát hiện tử huyệt chí mạng)*\n\n"
+                f"🛡️ **RED TEAM BÓC TRẦN:**\n"
                 f"{redteam_verdict}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🧹 **3. BẢO VỆ BỘ NHỚ FOUNDER:**\n"
-                f"✅ Toàn bộ ý tưởng rủi ro này đã bị **HỦY BỎ & XÓA KHỎI BỘ NHỚ TẠM**, không lưu vào Action Backlog để bảo vệ tài nguyên của Founder!"
+                f"💡 **TÓM LƯỢC ĐỀ XUẤT CTO:**\n"
+                f"{cto_output[:350]}...\n\n"
+                f"🧹 *Đã hủy bỏ & xóa sạch bộ nhớ tạm để bảo vệ tài nguyên Founder!*"
             )
             return combined, True
         else:
             combined = (
-                f"🚦 **KẾT LUẬN LIÊN ĐOÀN: 🟢 ĐÃ THẨM ĐỊNH & PHÊ DUYỆT (APPROVED)**\n"
-                f"*(CTO đề xuất + Red Team đã kiểm chứng độ an toàn & khả thi)*\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"💡 **1. GIẢI PHÁP CỐT LÕI CỦA CTO:**\n"
+                f"🚦 **KẾT LUẬN LIÊN ĐOÀN: 🟢 ĐÃ PHÊ DUYỆT**\n"
+                f"*(CTO đề xuất + Red Team đã kiểm chứng an toàn)*\n\n"
+                f"💡 **GIẢI PHÁP CTO:**\n"
                 f"{cto_output}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🛡️ **2. LƯU Ý PHẢN BIỆN TỪ RED TEAM:**\n"
+                f"🛡️ **GÓC NHÌN RED TEAM:**\n"
                 f"{redteam_verdict}"
             )
             return combined, False
