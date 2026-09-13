@@ -1,16 +1,24 @@
 services:
   - type: web
-    name: vibecheck-ai-cto
+    name: vibecheck-ai-bot
     runtime: docker
     plan: free
     region: singapore
+    healthCheckPath: /healthz
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        value: 8514395299:AAEpnX4gzW-tmWYn0Cgw3jtqT_2_KhsQSoM
+        sync: false
+      - key: TELEGRAM_BOT_2_TOKEN
+        sync: false
       - key: GEMINI_API_KEY
-        value: AQ.Ab8RN6K1apdChvhOwImSk93zexZovS0e3s4KjkQkhhEkGJdtQw
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: WEBHOOK_SECRET_TOKEN
+        sync: false
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: PYTHONIOENCODING
         value: "utf-8"
+
 

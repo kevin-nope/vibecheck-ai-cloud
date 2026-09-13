@@ -5,10 +5,13 @@ import time
 import json
 import logging
 import threading
+import random
+import concurrent.futures
 from pathlib import Path
 import telebot
 from telebot import types as tele_types
 from dotenv import load_dotenv
+from escalation_system import AdminChatIDManager
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -26,10 +29,11 @@ logger = logging.getLogger("VibeCheck_RedTeam")
 
 TELEGRAM_BOT_2_TOKEN = os.getenv("TELEGRAM_BOT_2_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN_2") or os.getenv("BOT_2_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "8546576092")
 
 if not TELEGRAM_BOT_2_TOKEN:
     logger.error("THIẾU TELEGRAM_BOT_2_TOKEN! Vui lòng thiết lập trong biến môi trường hoặc .env")
+
+REDTEAM_SEMAPHORE = threading.Semaphore(3)
 
 # Thư mục lưu trữ session đệm
 SESSIONS_DIR = Path("sessions")
@@ -182,13 +186,20 @@ def safe_send_markdown(bot, chat_id, text, reply_to_message_id=None):
             except Exception as final_e:
                 logger.error(f"Failed to send message chunk: {final_e}")
 
-def call_gemini_redteam(chat_id, current_user_input, save_memory=True):
+def call_gemini_redteam(chat_id, current_user_input, save_memory=True, timeout_seconds=35.0):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return (
             "⚠️ **CHƯA THIẾT LẬP GEMINI API KEY**\n\n"
             "Vui lòng thiết lập biến môi trường `GEMINI_API_KEY` từ Google AI Studio (https://aistudio.google.com/app/apikey) để kích hoạt não bộ AI."
         )
+
+    acquired = REDTEAM_SEMAPHORE.acquire(timeout=timeout_seconds)
+    if not acquired:
+        return "⚠️ Lỗi kết nối Google AI Studio: Hàng đợi AI quá tải (Timeout semaphore 35s)"
+
+    start_time = time.time()
+    deadline = start_time + timeout_seconds
 
     try:
         from google import genai
@@ -200,7 +211,6 @@ def call_gemini_redteam(chat_id, current_user_input, save_memory=True):
             temperature=0.3
         )
 
-        # Xây dựng danh sách Contents
         contents = []
         if save_memory:
             history = memory_mgr.get_history(chat_id)
@@ -209,7 +219,6 @@ def call_gemini_redteam(chat_id, current_user_input, save_memory=True):
                 text = item.get("text", "")
                 contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
 
-        # Thêm tin nhắn hiện tại
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=current_user_input)]))
 
         cascade_models = [
@@ -223,21 +232,38 @@ def call_gemini_redteam(chat_id, current_user_input, save_memory=True):
 
         last_err = None
         for m in cascade_models:
+            if time.time() >= deadline:
+                break
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
             try:
-                res = client.models.generate_content(
-                    model=m,
-                    contents=contents,
-                    config=config
-                )
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        client.models.generate_content,
+                        model=m,
+                        contents=contents,
+                        config=config
+                    )
+                    res = future.result(timeout=min(remaining, 25.0))
                 if res and res.text:
                     reply_text = res.text.strip()
-                    # Chỉ lưu vào bộ nhớ trượt khi được phép
                     if save_memory:
                         memory_mgr.add_turn(chat_id, current_user_input, reply_text)
                     return reply_text
+            except concurrent.futures.TimeoutError:
+                last_err = TimeoutError(f"Model {m} timed out")
+                logger.warning(f"RedTeam model {m} timed out")
+                continue
             except Exception as ex:
                 last_err = ex
+                err_str = str(ex)
+                if any(kw in err_str for kw in ["401", "UNAUTHENTICATED", "API_KEY_INVALID"]):
+                    return f"❌ Lỗi xác thực: {ex}"
                 logger.warning(f"Model {m} fallback: {ex}")
+                backoff = random.uniform(0.1, 0.3)
+                if time.time() + backoff < deadline:
+                    time.sleep(backoff)
                 continue
 
         return f"⚠️ Lỗi kết nối Google AI Studio: {last_err}"
@@ -245,6 +271,8 @@ def call_gemini_redteam(chat_id, current_user_input, save_memory=True):
     except Exception as e:
         logger.error(f"Gemini calling error: {e}")
         return f"❌ Lỗi hệ thống: {e}"
+    finally:
+        REDTEAM_SEMAPHORE.release()
 
 def create_bot():
     token = TELEGRAM_BOT_2_TOKEN
@@ -252,11 +280,15 @@ def create_bot():
         raise ValueError("TELEGRAM_BOT_2_TOKEN is missing!")
     bot = telebot.TeleBot(token)
 
+    def is_auth(msg):
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat_id = getattr(getattr(msg, "chat", None), "id", None)
+        return (user_id and AdminChatIDManager.is_authorized(user_id)) or (chat_id and AdminChatIDManager.is_authorized(chat_id))
+
     @bot.message_handler(commands=['start', 'help'])
     def send_welcome(message):
-        chat_id = str(message.chat.id)
-        if ADMIN_CHAT_ID and chat_id != str(ADMIN_CHAT_ID):
-            bot.reply_to(message, "⛔ Quyền truy cập bị từ chối. Đây là Trọng tài Phản biện Chiến lược cá nhân của Mr. Kevin.")
+        if not is_auth(message):
+            bot.reply_to(message, "⛔ Quyền truy cập bị từ chối. Bot chỉ phục vụ Founder.")
             return
 
         welcome_text = (
@@ -274,16 +306,14 @@ def create_bot():
 
     @bot.message_handler(commands=['new', 'reset', 'clear'])
     def handle_reset_session(message):
-        chat_id = str(message.chat.id)
-        if ADMIN_CHAT_ID and chat_id != str(ADMIN_CHAT_ID):
+        if not is_auth(message):
             return
         memory_mgr.reset(message.chat.id)
         bot.reply_to(message, "🧹 **BỘ NHỚ ĐÃ ĐƯỢC LÀM SẠCH 100%!**\n\nTôi đã đóng hồ sơ cũ và mở một trang giấy trắng. Token tiêu thụ đã về 0. Bạn hãy gửi vụ việc mới vào đây!")
 
     @bot.message_handler(commands=['verdict', 'toihauthu'])
     def handle_verdict_command(message):
-        chat_id = str(message.chat.id)
-        if ADMIN_CHAT_ID and chat_id != str(ADMIN_CHAT_ID):
+        if not is_auth(message):
             return
         prompt_command = "Dựa trên toàn bộ dữ liệu và các dự án chúng ta vừa trao đổi, hãy xuất ngay một 'VĂN BẢN TỐI HẬU THƯ / QUYẾT ĐỊNH ĐÌNH CHỈ' (Termination Notice) thật sắc bén, quyết đoán, nêu rõ lý do hủy dự án nào và yêu cầu CTO dừng ngay lập tức."
         status_msg = bot.reply_to(message, "⏳ [Red Team] Đang rà soát toàn bộ lịch sử vụ việc & soạn thảo Tối Hậu Thư...")
@@ -301,9 +331,8 @@ def create_bot():
 
     @bot.message_handler(func=lambda msg: True, content_types=['text', 'photo'])
     def handle_audit_request(message):
-        chat_id = str(message.chat.id)
-        if ADMIN_CHAT_ID and chat_id != str(ADMIN_CHAT_ID):
-            bot.reply_to(message, "⛔ Quyền truy cập bị từ chối.")
+        if not is_auth(message):
+            bot.reply_to(message, "⛔ Quyền truy cập bị từ chối. Bot chỉ phục vụ Founder.")
             return
 
         user_content = message.text or message.caption or ""

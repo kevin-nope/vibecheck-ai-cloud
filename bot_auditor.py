@@ -8,6 +8,14 @@ import html
 import atexit
 import threading
 import warnings
+import uuid
+import socket
+import ipaddress
+import random
+import logging
+import concurrent.futures
+from urllib.parse import urlparse
+from typing import Union, Optional, Tuple, Set, List, Dict
 from datetime import datetime
 import requests
 import telebot
@@ -16,6 +24,12 @@ from telebot import apihelper
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+
+logging.basicConfig(
+    format="%(asctime)s - [%(name)s] - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger("VibeCheck_Auditor")
 
 # Tắt cảnh báo không cần thiết từ thư viện Google GenAI
 warnings.filterwarnings("ignore")
@@ -207,6 +221,204 @@ def pop_last_history_turn(chat_id: int):
 
 
 # ==============================================================================
+# HỆ THỐNG AN NINH & DEDUPLICATION (STRICT AUTHORIZATION, IDEMPOTENCY & SSRF GUARD)
+# ==============================================================================
+
+class IdempotencyManager:
+    """
+    Thread-safe deduplication for Telegram updates and callback queries.
+    Prevents duplicate execution on network retry.
+    """
+    def __init__(self, max_entries: int = 5000, ttl_seconds: float = 600.0):
+        self.max_entries = max_entries
+        self.ttl_seconds = ttl_seconds
+        self._lock = threading.Lock()
+        self._seen: Dict[str, float] = {}
+
+    def is_duplicate_and_record(self, key: str) -> bool:
+        if not key:
+            return False
+        now = time.time()
+        with self._lock:
+            # Evict expired entries if table grows large
+            if len(self._seen) > self.max_entries:
+                expired = [k for k, ts in self._seen.items() if now - ts > self.ttl_seconds]
+                for k in expired:
+                    del self._seen[k]
+                if len(self._seen) > self.max_entries:
+                    oldest = sorted(self._seen.items(), key=lambda x: x[1])[: int(self.max_entries * 0.2)]
+                    for k, _ in oldest:
+                        self._seen.pop(k, None)
+
+            if key in self._seen:
+                if now - self._seen[key] <= self.ttl_seconds:
+                    return True
+            self._seen[key] = now
+            return False
+
+    def claim(self, key: str) -> bool:
+        return not self.is_duplicate_and_record(key)
+
+idempotency_mgr = IdempotencyManager()
+
+
+def check_authorization(bot: telebot.TeleBot, event: Union[tele_types.Message, tele_types.CallbackQuery]) -> bool:
+    """
+    Strict Owner Authorization:
+    Validates event sender against AdminChatIDManager (derived strictly from ADMIN_CHAT_ID).
+    Rejects any unauthorized users with immediate alert.
+    """
+    user = getattr(event, "from_user", None)
+    user_id = user.id if user else None
+    
+    msg = getattr(event, "message", None) if isinstance(event, tele_types.CallbackQuery) else event
+    chat_id = msg.chat.id if msg and getattr(msg, "chat", None) else None
+
+    is_auth = (user_id and AdminChatIDManager.is_authorized(user_id)) or (chat_id and AdminChatIDManager.is_authorized(chat_id))
+    if not is_auth:
+        logger.warning(f"⛔ Unauthorized access attempt rejected: user_id={user_id}, chat_id={chat_id}")
+        if isinstance(event, tele_types.CallbackQuery):
+            try:
+                bot.answer_callback_query(event.id, "⛔ Quyền truy cập bị từ chối. Bot chỉ phục vụ Founder.", show_alert=True)
+            except Exception:
+                pass
+        elif isinstance(event, tele_types.Message):
+            try:
+                bot.reply_to(event, "⛔ Quyền truy cập bị từ chối. Bot chỉ phục vụ Founder.")
+            except Exception:
+                pass
+        return False
+    return True
+
+
+def is_safe_public_url(url: str) -> bool:
+    """
+    SSRF Protection: Rejects private, loopback, link-local, reserved, multicast,
+    and cloud metadata IP addresses (e.g. 169.254.169.254).
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        lower_host = hostname.lower()
+        if lower_host in ("localhost", "127.0.0.1", "0.0.0.0", "metadata.google.internal"):
+            return False
+        if lower_host.endswith(".local") or lower_host.endswith(".internal"):
+            return False
+
+        addr_info = socket.getaddrinfo(hostname, None)
+        for entry in addr_info:
+            ip_str = entry[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or 
+                ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                return False
+            if ip_str.startswith("169.254."):
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"SSRF validation blocked URL '{url}': {e}")
+        return False
+
+
+def validate_magic_bytes(chunk: bytes, allowed_types: Union[tuple, list, str, None] = None) -> bool:
+    """Validates file signature magic bytes for media types."""
+    if not chunk:
+        return False
+    if isinstance(allowed_types, str):
+        allowed_types = (allowed_types,)
+    elif not allowed_types:
+        allowed_types = ("image", "video")
+
+    is_jpeg = chunk.startswith(b"\xff\xd8\xff")
+    is_png = chunk.startswith(b"\x89PNG\r\n\x1a\n")
+    is_webp = len(chunk) >= 12 and chunk[:4] == b"RIFF" and chunk[8:12] == b"WEBP"
+    is_gif = chunk.startswith(b"GIF87a") or chunk.startswith(b"GIF89a")
+    is_image = is_jpeg or is_png or is_webp or is_gif
+
+    is_mp4 = len(chunk) >= 12 and chunk[4:8] == b"ftyp"
+    is_matroska = chunk.startswith(b"\x1a\x45\xdf\xa3")
+    is_video = is_mp4 or is_matroska
+
+    for t in allowed_types:
+        if t == "image" and is_image:
+            return True
+        if t == "video" and is_video:
+            return True
+        if t in ("any", "text"):
+            return True
+    return False
+
+
+def bounded_stream_download(url: str, max_bytes: int = 20 * 1024 * 1024, allowed_types: tuple = None, timeout: int = 25) -> Optional[bytes]:
+    """
+    Bounded streaming download with SSRF guard, size cap, and magic byte validation.
+    Aborts immediately if payload exceeds max_bytes or resolves to an unsafe IP.
+    """
+    if not is_safe_public_url(url):
+        logger.warning(f"Blocked unsafe or private URL: {url}")
+        return None
+
+    try:
+        session = requests.Session()
+        curr_url = url
+        res = None
+        for _ in range(5):
+            if not is_safe_public_url(curr_url):
+                logger.warning(f"Blocked redirected unsafe URL: {curr_url}")
+                return None
+            res = session.get(curr_url, stream=True, timeout=timeout, allow_redirects=False, headers={"User-Agent": "Mozilla/5.0"})
+            if 300 <= res.status_code < 400:
+                loc = res.headers.get("Location")
+                if not loc:
+                    break
+                curr_url = requests.compat.urljoin(curr_url, loc)
+                continue
+            break
+        else:
+            logger.warning(f"Too many redirects for URL: {url}")
+            return None
+
+        if not res or res.status_code != 200:
+            return None
+
+        cl = res.headers.get("Content-Length")
+        if cl and cl.isdigit() and int(cl) > max_bytes:
+            logger.warning(f"Content-Length ({cl}) exceeds max_bytes ({max_bytes}) for {url}")
+            return None
+
+        chunks = []
+        downloaded = 0
+        first_chunk = True
+
+        for chunk in res.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            downloaded += len(chunk)
+            if downloaded > max_bytes:
+                logger.warning(f"Downloaded stream exceeded max_bytes ({max_bytes}) for {url}. Aborted.")
+                res.close()
+                return None
+            
+            if first_chunk and allowed_types:
+                first_chunk = False
+                if not validate_magic_bytes(chunk, allowed_types):
+                    logger.warning(f"Magic bytes validation failed for {url}")
+                    res.close()
+                    return None
+            chunks.append(chunk)
+
+        return b"".join(chunks)
+    except Exception as e:
+        logger.warning(f"Bounded stream download error for {url}: {e}")
+        return None
+
+
+# ==============================================================================
 # SYSTEM PROMPTS: CHUẨN VIBECHECK AI (v2.2)
 # ==============================================================================
 
@@ -303,66 +515,96 @@ QUY CHUẨN TRÌNH BÀY MOBILE-FIRST (BẮT BUỘC - ĐỌC LƯỚT DƯỚI 15 G
 """
 
 # ==============================================================================
-# HÀM BỌC GỌI GEMINI BỀN BỈ (AUTO-RETRY & MULTI-MODEL CASCADE — CHỐNG 503/429)
+# HÀM BỌC GỌI GEMINI BỀN BỈ (35S HARD DEADLINE, SEMAPHORE & MULTI-MODEL CASCADE)
 # ==============================================================================
 
-def call_gemini_resilient(contents, instruction: str = "", temperature: float = 0.2, max_retries: int = 2) -> str:
-    """
-    Gọi Gemini với cơ chế cascade đa model và tự phục hồi cấp Enterprise:
-    1. Ưu tiên model siêu nhẹ, quota dồi dào, tốc độ cao: gemini-3.5-flash-lite
-    2. Fallback sang: gemini-3.5-flash
-    3. Fallback sang: gemini-flash-lite-latest
-    4. Fallback sang: gemini-flash-latest
-    5. Fallback sang: gemini-3.7-flash
-    6. Dự phòng cuối: gemini-3.6-flash
-    Nếu bất kỳ model nào gặp 429 (Resource Exhausted), 404 (Not Found), hoặc 503 (Server Unavailable),
-    hệ thống lập tức chuyển sang model kế tiếp trong mili-giây mà không làm nghẽn luồng.
-    """
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    config = types.GenerateContentConfig(
-        system_instruction=instruction if instruction else None,
-        temperature=temperature
-    )
-    models_cascade = [
-        "gemini-3.5-flash-lite",
-        "gemini-3.5-flash",
-        "gemini-flash-lite-latest",
-        "gemini-flash-latest",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash"
-    ]
+GEMINI_SEMAPHORE = threading.Semaphore(3)
 
-    last_err = None
-    for model_name in models_cascade:
-        for attempt in range(max_retries):
-            try:
-                res = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=config
-                )
-                if res and res.text:
-                    return res.text.strip()
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                # Nếu 401 UNAUTHENTICATED hoặc API key hết hạn/không hợp lệ -> Dừng ngay lập tức
-                if any(kw in err_str for kw in ["401", "UNAUTHENTICATED", "ACCESS_TOKEN_TYPE_UNSUPPORTED", "API_KEY_INVALID", "invalid authentication"]):
-                    print(f"\n❌ [LỖI XÁC THỰC] Gemini API Key đã hết hạn hoặc không hợp lệ: {err_str}\n", flush=True)
-                    raise PermissionError(f"Gemini API Key trong file .env đã hết hạn hoặc không hợp lệ (401 UNAUTHENTICATED). Vui lòng cập nhật API Key vĩnh viễn (bắt đầu bằng AIzaSy...) từ Google AI Studio (https://aistudio.google.com/app/apikey).")
-                # Nếu hết quota (429) hoặc model không khả dụng (404/400) -> Chuyển ngay model tiếp theo
-                if any(kw in err_str for kw in ["429", "RESOURCE_EXHAUSTED", "quota", "404", "NOT_FOUND"]):
-                    print(f"⚠️ [{model_name}] Quota giới hạn, chuyển ngay model kế tiếp trong cascade...", flush=True)
-                    break
-                # Nếu 503 UNAVAILABLE (server spike) -> Chuyển ngay model tiếp theo
-                elif any(kw in err_str for kw in ["503", "UNAVAILABLE"]):
-                    print(f"⚠️ [{model_name}] 503 Unavailable, chuyển ngay model kế tiếp...", flush=True)
-                    break
-                else:
-                    # Các lỗi mạng tạm thời khác: ngủ 0.5s rồi thử lại
-                    time.sleep(0.5)
+def call_gemini_resilient(contents, instruction: str = "", temperature: float = 0.2, max_retries: int = 2, timeout_seconds: float = 35.0) -> str:
+    """
+    Enterprise-grade resilient Gemini invocation:
+    1. 35s hard deadline
+    2. Concurrency capped via Semaphore (max 3 concurrent calls)
+    3. Multi-model cascade: gemini-3.5-flash-lite -> gemini-3.5-flash -> gemini-flash-lite-latest -> gemini-flash-latest -> gemini-3.7-flash -> gemini-3.6-flash
+    4. Jittered exponential backoff for transient 503/network errors
+    5. Fail-fast on 400 (Bad Request), 401/403 (Auth/Permissions)
+    """
+    if not GEMINI_API_KEY or len(GEMINI_API_KEY.strip()) < 10:
+        raise PermissionError("Thiếu GEMINI_API_KEY hoặc key không hợp lệ.")
 
-    raise RuntimeError(f"Hệ thống máy chủ AI đang bảo trì hoặc quá tải tạm thời ({last_err}). Vui lòng thử lại sau 5 giây!")
+    acquired = GEMINI_SEMAPHORE.acquire(timeout=timeout_seconds)
+    if not acquired:
+        raise TimeoutError("Hệ thống AI đạt giới hạn luồng đồng thời; quá thời gian chờ (Semaphore timeout).")
+
+    start_time = time.time()
+    deadline = start_time + timeout_seconds
+
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        config = types.GenerateContentConfig(
+            system_instruction=instruction if instruction else None,
+            temperature=temperature
+        )
+        models_cascade = [
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-flash-lite-latest",
+            "gemini-flash-latest",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash"
+        ]
+
+        last_err = None
+        for model_name in models_cascade:
+            if time.time() >= deadline:
+                break
+            for attempt in range(max_retries):
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                try:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(
+                            client.models.generate_content,
+                            model=model_name,
+                            contents=contents,
+                            config=config
+                        )
+                        res = future.result(timeout=min(remaining, 25.0))
+                    if res and res.text:
+                        return res.text.strip()
+                except concurrent.futures.TimeoutError:
+                    last_err = TimeoutError(f"Model {model_name} timed out")
+                    logger.warning(f"Gemini call timed out on {model_name}")
+                    break
+                except Exception as e:
+                    last_err = e
+                    err_str = str(e)
+                    # 401 / Auth / Key invalid -> Dừng ngay lập tức
+                    if any(kw in err_str for kw in ["401", "UNAUTHENTICATED", "ACCESS_TOKEN_TYPE_UNSUPPORTED", "API_KEY_INVALID", "invalid authentication"]):
+                        logger.error(f"Gemini API Key authentication failure: {err_str}")
+                        raise PermissionError(f"Gemini API Key không hợp lệ hoặc đã hết hạn: {err_str}")
+                    # 400 / 403 -> Fail fast
+                    if any(kw in err_str for kw in ["400", "INVALID_ARGUMENT", "403", "PERMISSION_DENIED"]):
+                        logger.error(f"Gemini client rejection (400/403): {err_str}")
+                        raise ValueError(f"Yêu cầu AI bị từ chối: {err_str}")
+                    # 429 Quota / 404 Not Found -> Chuyển ngay model kế tiếp
+                    if any(kw in err_str for kw in ["429", "RESOURCE_EXHAUSTED", "quota", "404", "NOT_FOUND"]):
+                        logger.warning(f"[{model_name}] Quota exhausted/Not found, switching to next model.")
+                        break
+                    # 503 Unavailable -> Chuyển ngay model kế tiếp
+                    elif any(kw in err_str for kw in ["503", "UNAVAILABLE"]):
+                        logger.warning(f"[{model_name}] 503 Unavailable, switching to next model.")
+                        break
+                    else:
+                        # Transient error: backoff with jitter
+                        backoff = min(2.0, (0.4 * (2 ** attempt)) + random.uniform(0.1, 0.3))
+                        if time.time() + backoff < deadline:
+                            time.sleep(backoff)
+
+        raise RuntimeError(f"Hệ thống máy chủ AI đang bảo trì hoặc quá tải tạm thời ({last_err}). Vui lòng thử lại sau 5 giây!")
+    finally:
+        GEMINI_SEMAPHORE.release()
 
 
 # ==============================================================================
@@ -424,6 +666,9 @@ def extract_github_info(url: str) -> str:
 
 def fetch_jina_reader(url: str) -> str:
     """Lấy nội dung Markdown sạch hoặc phụ đề video YouTube qua Jina Reader."""
+    if not is_safe_public_url(url):
+        return "⚠️ URL không an toàn hoặc thuộc dải IP nội bộ bị chặn."
+
     jina_url = f"https://r.jina.ai/{url}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -451,6 +696,9 @@ def fetch_facebook_opengraph(url: str) -> tuple[str, str, str]:
     Cho phép lấy được tiêu đề và nội dung tóm tắt kể cả khi Facebook chặn bot thông thường.
     Trả về: (title, description, image_url)
     """
+    if not is_safe_public_url(url):
+        return "", "", ""
+
     headers = {
         "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -469,7 +717,7 @@ def fetch_facebook_opengraph(url: str) -> tuple[str, str, str]:
             img = og_img.group(1).strip() if og_img else ""
             return title, desc, img
     except Exception as e:
-        print(f"Lưu ý khi cào Facebook OpenGraph ({url}): {e}", flush=True)
+        logger.warning(f"Lưu ý khi cào Facebook OpenGraph ({url}): {e}")
     return "", "", ""
 
 
@@ -477,18 +725,22 @@ def fetch_tiktok_content(url: str) -> tuple[str, str, bytes | None, bytes | None
     """
     Bóc tách dữ liệu đa tầng video / ảnh TikTok thực tế:
     1. Hỗ trợ cả link đầy đủ và link rút gọn (vt.tiktok.com / vm.tiktok.com).
-    2. Tải video MP4 trực tiếp qua TikWM API không dính watermark (nếu <= 25MB).
-    3. Nếu video quá lớn (> 25MB) hoặc tải lỗi: tải ảnh bìa gốc HD (cover) làm fallback đưa vào Vision.
-    4. Nếu là bài đăng dạng Album ảnh (Photo Carousel): tải tối đa 4 ảnh đầu tiên để đưa vào Vision.
-    5. Dự phòng qua TikTok Official oEmbed API nếu TikWM gặp sự cố.
+    2. Tải video MP4 an toàn qua bounded_stream_download (tối đa 20MB, kiểm tra magic bytes).
+    3. Tải ảnh bìa hoặc ảnh album qua bounded_stream_download (tối đa 5MB).
+    4. Ngăn chặn triệt để SSRF và Memory Exhaustion.
     """
     clean_url = url
     try:
         if any(short in url for short in ["vt.tiktok.com", "vm.tiktok.com", "/t/"]):
-            r = requests.head(url, allow_redirects=True, timeout=10)
-            clean_url = r.url
+            if is_safe_public_url(url):
+                r = requests.head(url, allow_redirects=True, timeout=10)
+                clean_url = r.url
     except Exception:
         pass
+
+    if not is_safe_public_url(clean_url):
+        logger.warning(f"Blocked unsafe TikTok URL: {clean_url}")
+        return "", "", None, None, []
 
     title = ""
     author = ""
@@ -499,64 +751,51 @@ def fetch_tiktok_content(url: str) -> tuple[str, str, bytes | None, bytes | None
     # 1. Thử lấy media qua TikWM API
     try:
         api_url = f"https://www.tikwm.com/api/?url={requests.utils.quote(clean_url)}"
-        res = requests.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
-        if res.status_code == 200:
-            res_json = res.json()
-            if res_json.get("code") == 0:
-                data = res_json.get("data", {})
-                title = data.get("title", "")
-                author = data.get("author", {}).get("nickname", "")
-                video_size = data.get("size", 0)
-                play_url = data.get("play") or data.get("wmplay")
-                cover_url = data.get("origin_cover") or data.get("cover")
-                carousel_images = data.get("images")
+        if is_safe_public_url(api_url):
+            res = requests.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+            if res.status_code == 200:
+                res_json = res.json()
+                if res_json.get("code") == 0:
+                    data = res_json.get("data", {})
+                    title = data.get("title", "")
+                    author = data.get("author", {}).get("nickname", "")
+                    play_url = data.get("play") or data.get("wmplay")
+                    cover_url = data.get("origin_cover") or data.get("cover")
+                    carousel_images = data.get("images")
 
-                # Trường hợp A: Video chuẩn <= 25MB
-                if play_url and (video_size <= 25 * 1024 * 1024):
-                    v_res = requests.get(play_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-                    if v_res.status_code == 200 and len(v_res.content) <= 25 * 1024 * 1024:
-                        video_bytes = v_res.content
+                    # Trường hợp A: Video chuẩn <= 20MB
+                    if play_url and is_safe_public_url(play_url):
+                        video_bytes = bounded_stream_download(play_url, max_bytes=20 * 1024 * 1024, allowed_types=("video",), timeout=30)
 
-                # Trường hợp B: Album ảnh (Slideshow)
-                if not video_bytes and carousel_images and isinstance(carousel_images, list):
-                    for img_url in carousel_images[:4]:
-                        try:
-                            img_res = requests.get(img_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-                            if img_res.status_code == 200:
-                                images_bytes_list.append(img_res.content)
-                        except Exception:
-                            pass
+                    # Trường hợp B: Album ảnh (Slideshow) <= 5MB mỗi ảnh
+                    if not video_bytes and carousel_images and isinstance(carousel_images, list):
+                        for img_url in carousel_images[:4]:
+                            if is_safe_public_url(img_url):
+                                img_data = bounded_stream_download(img_url, max_bytes=5 * 1024 * 1024, allowed_types=("image",), timeout=10)
+                                if img_data:
+                                    images_bytes_list.append(img_data)
 
-                # Trường hợp C: Video quá lớn hoặc không tải được -> Tải ảnh bìa HD (cover) làm fallback
-                if not video_bytes and not images_bytes_list and cover_url:
-                    try:
-                        c_res = requests.get(cover_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
-                        if c_res.status_code == 200:
-                            cover_bytes = c_res.content
-                    except Exception:
-                        pass
+                    # Trường hợp C: Fallback sang ảnh bìa HD (cover) <= 5MB
+                    if not video_bytes and not images_bytes_list and cover_url and is_safe_public_url(cover_url):
+                        cover_bytes = bounded_stream_download(cover_url, max_bytes=5 * 1024 * 1024, allowed_types=("image",), timeout=12)
     except Exception as e:
-        print(f"Lưu ý khi tải TikTok qua TikWM: {e}", flush=True)
+        logger.warning(f"Lưu ý khi tải TikTok qua TikWM: {e}")
 
     # 2. Fallback qua TikTok oEmbed API nếu chưa có title
     if not title:
         try:
             oembed_url = f"https://www.tiktok.com/oembed?url={requests.utils.quote(clean_url)}"
-            res_o = requests.get(oembed_url, timeout=10)
-            if res_o.status_code == 200:
-                o_data = res_o.json()
-                title = o_data.get("title", "")
-                author = o_data.get("author_name", "")
-                thumb_url = o_data.get("thumbnail_url")
-                if thumb_url and not video_bytes and not cover_bytes:
-                    try:
-                        th_res = requests.get(thumb_url, timeout=10)
-                        if th_res.status_code == 200:
-                            cover_bytes = th_res.content
-                    except Exception:
-                        pass
+            if is_safe_public_url(oembed_url):
+                res_o = requests.get(oembed_url, timeout=10)
+                if res_o.status_code == 200:
+                    o_data = res_o.json()
+                    title = o_data.get("title", "")
+                    author = o_data.get("author_name", "")
+                    thumb_url = o_data.get("thumbnail_url")
+                    if thumb_url and not video_bytes and not cover_bytes and is_safe_public_url(thumb_url):
+                        cover_bytes = bounded_stream_download(thumb_url, max_bytes=5 * 1024 * 1024, allowed_types=("image",), timeout=10)
         except Exception as e:
-            print(f"Lưu ý khi gọi TikTok oEmbed: {e}", flush=True)
+            logger.warning(f"Lưu ý khi gọi TikTok oEmbed: {e}")
 
     return title, author, video_bytes, cover_bytes, images_bytes_list
 
@@ -828,10 +1067,12 @@ execute_triple_pass_audit = execute_dual_pass_audit
 
 def autonomous_redteam_review(chat_id: int, user_request: str, cto_output: str) -> tuple[str, bool]:
     """
-    TỰ ĐỘNG HÓA ĐA ĐẶC VỤ (AUTONOMOUS DUAL-AGENT PIPELINE):
+    TỰ ĐỘNG HÓA ĐA ĐẶC VỤ (AUTONOMOUS DUAL-AGENT PIPELINE — FAIL-CLOSED PROTOCOL):
     Sau khi CTO đưa ra giải pháp, Red Team tự động can thiệp ngầm để thẩm định và bóc tách lỗ hổng.
-    Nếu Red Team phán cờ ĐỎ: Tự động hủy bỏ dự án ngay tại chỗ, xóa sạch khỏi bộ nhớ, cảnh báo Founder!
-    Trả về (final_text, is_cancelled).
+    Fail-Closed Policy:
+    - Nếu Red Team phán cờ ĐỎ: Hủy bỏ dự án, xóa sạch khỏi bộ nhớ tạm, trả về is_cancelled=True.
+    - Nếu Red Team gặp lỗi/timeout/thiếu key: TUYỆT ĐỐI KHÔNG TỰ DUYỆT. Chuyển sang UNVERIFIED (TẠM KHÓA PHÊ DUYỆT) và trả về is_cancelled=True.
+    - Chỉ khi Red Team kiểm chứng an toàn (cờ xanh/vàng không bị lỗi), hệ thống mới phê duyệt.
     """
     non_audit_keywords = ["chào", "hello", "hi", "bạn là ai", "hướng dẫn", "trợ giúp", "/help", "/start", "cảm ơn", "tính năng", "lệnh"]
     if len(user_request.strip()) < 20 and any(k in user_request.lower() for k in non_audit_keywords):
@@ -840,7 +1081,6 @@ def autonomous_redteam_review(chat_id: int, user_request: str, cto_output: str) 
     try:
         from bot_redteam import call_gemini_redteam
         
-        # Cắt bớt văn bản đầu vào nếu quá dài để bảo vệ ngân sách token
         clean_user_input = user_request.strip()
         if len(clean_user_input) > 2000:
             clean_user_input = clean_user_input[:2000] + "... [Dữ liệu gốc đã được tóm lược]"
@@ -861,8 +1101,37 @@ def autonomous_redteam_review(chat_id: int, user_request: str, cto_output: str) 
         )
         
         redteam_verdict = call_gemini_redteam(chat_id, prompt_to_redteam, save_memory=False)
-        
-        is_red = ("🔴" in redteam_verdict) or ("cờ đỏ" in redteam_verdict.lower()) or ("đỏ:" in redteam_verdict.lower()) or ("hủy bỏ" in redteam_verdict.lower() and "yêu cầu" in redteam_verdict.lower())
+
+        # 1. Kiểm tra lỗi hệ thống hoặc timeout -> FAIL-CLOSED (Không bao giờ tự duyệt khi lỗi)
+        is_error = (
+            not redteam_verdict
+            or redteam_verdict.startswith("⚠️")
+            or redteam_verdict.startswith("❌")
+            or "lỗi kết nối" in redteam_verdict.lower()
+            or "lỗi hệ thống" in redteam_verdict.lower()
+            or "chưa thiết lập" in redteam_verdict.lower()
+        )
+        if is_error:
+            pop_last_history_turn(chat_id)
+            combined = (
+                f"🚦 **KẾT LUẬN LIÊN ĐOÀN: ⚠️ CHƯA THẨM ĐỊNH ĐƯỢC (UNVERIFIED / BLOCKED)**\n"
+                f"*(Quy chuẩn Fail-Closed: Red Team phản biện gặp lỗi/timeout nên khóa phê duyệt)*\n\n"
+                f"🛡️ **TRẠNG THÁI RED TEAM:**\n"
+                f"{redteam_verdict or 'Không nhận được phản hồi từ Red Team'}\n\n"
+                f"💡 **ĐỀ XUẤT CTO (CHỜ DUYỆT):**\n"
+                f"{clean_cto_output[:350]}...\n\n"
+                f"⚠️ *Yêu cầu gửi lại để thẩm định đối kháng trước khi triển khai!*"
+            )
+            return combined, True
+
+        # 2. Kiểm tra cờ ĐỎ (Yêu cầu hủy bỏ)
+        is_red = (
+            ("🔴" in redteam_verdict)
+            or ("cờ đỏ" in redteam_verdict.lower())
+            or ("đỏ:" in redteam_verdict.lower())
+            or ("hủy bỏ" in redteam_verdict.lower() and "yêu cầu" in redteam_verdict.lower())
+            or ("đình chỉ" in redteam_verdict.lower())
+        )
         
         if is_red:
             pop_last_history_turn(chat_id)
@@ -872,7 +1141,7 @@ def autonomous_redteam_review(chat_id: int, user_request: str, cto_output: str) 
                 f"🛡️ **RED TEAM BÓC TRẦN:**\n"
                 f"{redteam_verdict}\n\n"
                 f"💡 **TÓM LƯỢC ĐỀ XUẤT CTO:**\n"
-                f"{cto_output[:350]}...\n\n"
+                f"{clean_cto_output[:350]}...\n\n"
                 f"🧹 *Đã hủy bỏ & xóa sạch bộ nhớ tạm để bảo vệ tài nguyên Founder!*"
             )
             return combined, True
@@ -888,8 +1157,16 @@ def autonomous_redteam_review(chat_id: int, user_request: str, cto_output: str) 
             return combined, False
             
     except Exception as e:
-        print(f"⚠️ Autonomous RedTeam Review Error: {e}", flush=True)
-        return cto_output, False
+        logger.error(f"Autonomous RedTeam Review Error: {e}")
+        pop_last_history_turn(chat_id)
+        combined = (
+            f"🚦 **KẾT LUẬN LIÊN ĐOÀN: ⚠️ CHƯA THẨM ĐỊNH ĐƯỢC (UNVERIFIED / BLOCKED)**\n"
+            f"*(Quy chuẩn Fail-Closed: Quá trình Red Team gặp sự cố ({e}) - Tạm khóa phê duyệt)*\n\n"
+            f"💡 **ĐỀ XUẤT CTO (CHỜ THẨM ĐỊNH LẠI):**\n"
+            f"{cto_output[:350]}...\n\n"
+            f"⚠️ *Vui lòng thử lại sau giây lát!*"
+        )
+        return combined, True
 
 
 # ==============================================================================
@@ -1271,8 +1548,11 @@ def setup_bot():
 
     @bot.message_handler(commands=['start', 'help'])
     def handle_start(message):
+        if idempotency_mgr.is_duplicate_and_record(f"cmd_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         welcome_msg = (
             "🤖 **VIBECHECK AI (v2.8.0) — CTO THỰC CHIẾN & CỐ VẤN CÔNG NGHỆ**\n\n"
             "Tôi hoạt động với **2 chế độ thông minh song song**, **Lưu Trữ Theo Yêu Cầu (On-Demand)**, **So Găng Thay Thế 1v1** & **Chủ động nhắc việc tồn đọng**:\n\n"
@@ -1301,8 +1581,11 @@ def setup_bot():
     # 1. Xử lý ảnh chụp màn hình
     @bot.message_handler(content_types=['photo'])
     def handle_photo(message):
+        if idempotency_mgr.is_duplicate_and_record(f"photo_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         status_msg = safe_reply_to(bot, message, "⏳ VibeCheck AI v3.0 đang tải ảnh & kích hoạt Thẩm định 3 vòng Reflexion...")
         status_msg_id = status_msg.message_id if status_msg else None
         downloaded_file = None
@@ -1329,7 +1612,7 @@ def setup_bot():
             safe_edit_message(bot, chat_id, status_msg_id, "🛡️ Bot Red Team đang tự động thẩm định đối kháng...")
             final_report, is_cancelled = autonomous_redteam_review(chat_id, caption if caption else "Ảnh chụp màn hình", clean_report)
 
-            audit_id = str(int(time.time()))[-6:]
+            audit_id = uuid.uuid4().hex[:10]
             cache_audit_data(audit_id, meta_info)
 
             if status_msg_id:
@@ -1360,8 +1643,11 @@ def setup_bot():
     # 2. Xử lý file tài liệu PDF
     @bot.message_handler(content_types=['document'])
     def handle_document(message):
+        if idempotency_mgr.is_duplicate_and_record(f"doc_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         doc = message.document
         if not (doc.mime_type == "application/pdf" or (doc.file_name and doc.file_name.lower().endswith(".pdf"))):
             safe_reply_to(bot, message, "⚠️ VibeCheck AI hiện hỗ trợ tài liệu định dạng PDF để thẩm định kỹ thuật.")
@@ -1387,7 +1673,7 @@ def setup_bot():
             safe_edit_message(bot, chat_id, status_msg_id, "🛡️ Bot Red Team đang tự động thẩm định đối kháng...")
             final_report, is_cancelled = autonomous_redteam_review(chat_id, doc.file_name or "Tài liệu PDF", clean_report)
 
-            audit_id = str(int(time.time()))[-6:]
+            audit_id = uuid.uuid4().hex[:10]
             cache_audit_data(audit_id, meta_info)
 
             if status_msg_id:
@@ -1418,8 +1704,11 @@ def setup_bot():
     # 3. Xử lý tin nhắn thoại (Voice Note / Audio Hands-free cho tài xế & CTO)
     @bot.message_handler(content_types=['voice'])
     def handle_voice(message):
+        if idempotency_mgr.is_duplicate_and_record(f"voice_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         status_msg = safe_reply_to(bot, message, "🎙️ Đang tiếp nhận tin nhắn thoại...")
         status_msg_id = status_msg.message_id if status_msg else None
         voice_bytes = None
@@ -1468,9 +1757,12 @@ def setup_bot():
     # 3. Xử lý văn bản với Bộ Phân Loại Ý Định (Smart Intent Routing)
     @bot.message_handler(content_types=['text'])
     def handle_text(message):
+        if idempotency_mgr.is_duplicate_and_record(f"text_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         text = message.text.strip()
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
 
         # SMART INTENT INTERCEPTOR (Xử lý tức thì các phím bấm nhanh từ Bàn phím nổi - 0ms LLM Latency, 0đ quota)
         clean_lower = text.lower().strip()
@@ -1720,7 +2012,7 @@ def setup_bot():
                 safe_edit_message(bot, chat_id, status_msg_id, "🛡️ Bot Red Team đang tự động thẩm định đối kháng...")
                 final_report, is_cancelled = autonomous_redteam_review(chat_id, text if text else source_label, clean_report)
 
-                audit_id = str(int(time.time()))[-6:]
+                audit_id = uuid.uuid4().hex[:10]
                 cache_audit_data(audit_id, meta_info)
 
                 if status_msg_id:
@@ -1804,8 +2096,11 @@ def setup_bot():
     # 4. Quản trị Master Action Backlog (/backlog hoặc /todo)
     @bot.message_handler(commands=['backlog', 'todo'])
     def handle_backlog_cmd(message):
+        if idempotency_mgr.is_duplicate_and_record(f"backlog_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         bot.send_chat_action(chat_id, 'typing')
         if not os.path.exists(BACKLOG_FILE):
             send_long_message(bot, chat_id, "📋 Chưa có file `00_ACTION_BACKLOG.md` trên hệ thống.")
@@ -1839,8 +2134,11 @@ def setup_bot():
     # 5. Quản trị Chế độ nhắc việc tự động (/remind_now hoặc /remind_status)
     @bot.message_handler(commands=['remind_now', 'check_overdue'])
     def handle_remind_now(message):
+        if idempotency_mgr.is_duplicate_and_record(f"rnow_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         bot.send_chat_action(chat_id, 'typing')
         try:
             alerted = dispatch_overdue_alerts(
@@ -1860,8 +2158,11 @@ def setup_bot():
 
     @bot.message_handler(commands=['remind_status'])
     def handle_remind_status(message):
+        if idempotency_mgr.is_duplicate_and_record(f"rstat_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         bot.send_chat_action(chat_id, 'typing')
         try:
             saved_admin = AdminChatIDManager.get_chat_id(BASE_DIR)
@@ -1895,8 +2196,11 @@ def setup_bot():
     # Lệnh đình chỉ/hủy bỏ task nhanh (/cancel <task_id> hoặc /huy)
     @bot.message_handler(commands=['cancel', 'huy', 'dinhchi'])
     def handle_cancel_cmd(message):
+        if idempotency_mgr.is_duplicate_and_record(f"cancel_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         parts = message.text.strip().split()
         if len(parts) < 2:
             send_long_message(bot, chat_id, "⚠️ Vui lòng nhập mã Task cần hủy/đình chỉ.\nVí dụ: `/cancel TASK-20260911-1026`")
@@ -1911,8 +2215,11 @@ def setup_bot():
     # Lệnh bật/tắt hoặc kiểm tra nhắc nhở (/remind [on|off])
     @bot.message_handler(commands=['remind', 'nhacnho'])
     def handle_remind_cmd(message):
+        if idempotency_mgr.is_duplicate_and_record(f"remind_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         parts = message.text.strip().split()
         if len(parts) > 1:
             sub = parts[1].lower()
@@ -1930,8 +2237,11 @@ def setup_bot():
     # 6. Bảng điều khiển tác vụ nhanh (/menu)
     @bot.message_handler(commands=['menu'])
     def handle_menu_cmd(message):
+        if idempotency_mgr.is_duplicate_and_record(f"menu_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         menu_text = (
             "🎛️ <b>BẢNG ĐIỀU KHIỂN TÁC VỤ — VIBECHECK AI (v2.7.0)</b>\n\n"
             "Sếp muốn thực hiện thao tác nào? Chọn nhanh các nút bên dưới hoặc dùng bàn phím nhanh ở đáy màn hình:\n\n"
@@ -1947,20 +2257,27 @@ def setup_bot():
     # 7. Xóa lịch sử trò chuyện (/reset)
     @bot.message_handler(commands=['reset'])
     def handle_reset_cmd(message):
+        if idempotency_mgr.is_duplicate_and_record(f"reset_{message.message_id}_{message.chat.id}"):
+            return
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
-        AdminChatIDManager.save_chat_id(BASE_DIR, chat_id)
         clear_history(chat_id)
         send_long_message(bot, chat_id, "🔄 <b>ĐÃ XÓA SẠCH LỊCH SỬ HỘI THOẠI!</b>\nNgữ cảnh trò chuyện đã được làm mới hoàn toàn. Sếp có thể gửi câu hỏi hoặc chủ đề mới ngay bây giờ.")
 
     # 8. Điều khiển ẩn/hiện bàn phím nhanh
     @bot.message_handler(commands=['hide_keyboard'])
     def handle_hide_keyboard(message):
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
         hide_markup = tele_types.ReplyKeyboardRemove()
         bot.send_message(chat_id, "⌨️ Đã ẩn bàn phím nhanh. Gõ /show_keyboard để bật lại bất cứ lúc nào.", reply_markup=hide_markup)
 
     @bot.message_handler(commands=['show_keyboard'])
     def handle_show_keyboard(message):
+        if not check_authorization(bot, message):
+            return
         chat_id = message.chat.id
         show_markup = create_main_reply_keyboard()
         bot.send_message(chat_id, "⌨️ Đã bật lại bàn phím điều khiển nhanh!", reply_markup=show_markup)
@@ -1973,7 +2290,16 @@ def setup_bot():
                 bot.answer_callback_query(call.id)
                 return
 
-            AdminChatIDManager.save_chat_id(BASE_DIR, call.message.chat.id)
+            if idempotency_mgr.is_duplicate_and_record(f"cb_{call.id}_{call.data}"):
+                try:
+                    bot.answer_callback_query(call.id)
+                except Exception:
+                    pass
+                return
+
+            if not check_authorization(bot, call):
+                return
+
             action, audit_id = call.data.split("_", 1)
 
             # Xử lý các phím bấm từ Bảng điều khiển /menu: menu_{sub_action}
@@ -2118,7 +2444,16 @@ def setup_bot():
                         "status": "[ ] Chờ làm",
                         "link": rel_link
                     }
-                    new_task_id = backlog_mgr.supersede_task(old_task_id, rec_data)
+                    res = backlog_mgr.supersede_task(old_task_id, rec_data)
+                    if isinstance(res, tuple):
+                        success, new_task_id = res
+                    else:
+                        success, new_task_id = bool(res), str(res)
+
+                    if not success:
+                        bot.answer_callback_query(call.id, f"⚠️ Không thể thay thế: {old_task_id} không tồn tại hoặc không ở trạng thái [ ] Chờ làm.", show_alert=True)
+                        return
+
                     cached["task_id"] = new_task_id
                     bot.answer_callback_query(call.id, f"🔄 Đã thay thế {old_task_id} bằng {new_task_id}!", show_alert=True)
 

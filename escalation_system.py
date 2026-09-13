@@ -11,7 +11,7 @@ import uuid
 import logging
 import threading
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set, Union
 
 logger = logging.getLogger("SandboxEscalation")
 
@@ -491,6 +491,10 @@ class BacklogManager:
             if not target_record:
                 logger.warning(f"Task ID '{old_task_id}' not found for superseding.")
                 return False, ""
+
+            if not target_record.is_pending:
+                logger.warning(f"Task ID '{old_task_id}' is not pending (status: '{target_record.status}'). Cannot supersede non-pending task.")
+                return False, ""
             
             today_str = datetime.now().strftime("%Y%m%d")
             max_idx = 0
@@ -632,42 +636,47 @@ def generate_antigravity_mvp_prompt(task: BacklogRecord) -> str:
 
 
 # ==============================================================================
-# 6. ADMIN CHAT ID PERSISTENCE & AUTO-DISCOVERY
+# 6. ADMIN & OWNER STRICT AUTHORIZATION (NO AUTO-DISCOVERY)
 # ==============================================================================
 
 class AdminChatIDManager:
     """
-    Manages discovery and persistence of the admin Telegram chat_id.
-    Ensures proactive push alerts reach the bot owner.
+    Manages strict owner authorization exclusively via environment variables.
+    Zero Auto-Discovery: Never adopts arbitrary message senders as admin.
     """
-    FILE_NAME = ".admin_chat_id"
+    @classmethod
+    def get_authorized_ids(cls) -> Set[int]:
+        """Returns set of all authorized integer Telegram chat/user IDs."""
+        env_val = os.getenv("ADMIN_CHAT_ID") or os.getenv("TELEGRAM_ADMIN_CHAT_ID") or ""
+        authorized = set()
+        for token in env_val.replace(";", ",").split(","):
+            token = token.strip()
+            if token and token.lstrip("-").isdigit():
+                authorized.add(int(token))
+        return authorized
+    get_admin_ids = get_authorized_ids
+
+    @classmethod
+    def is_authorized(cls, user_or_chat_id: Union[int, str, None]) -> bool:
+        """Verifies if the given user or chat ID is an authorized owner."""
+        if user_or_chat_id is None:
+            return False
+        try:
+            target_id = int(str(user_or_chat_id).strip())
+            return target_id in cls.get_authorized_ids()
+        except (ValueError, TypeError):
+            return False
+
+    @classmethod
+    def get_chat_id(cls, base_dir: Optional[str] = None) -> Optional[int]:
+        """Returns the primary admin chat_id from environment."""
+        auth_ids = cls.get_authorized_ids()
+        return next(iter(auth_ids)) if auth_ids else None
 
     @classmethod
     def save_chat_id(cls, base_dir: str, chat_id: int) -> None:
-        try:
-            target_path = os.path.join(base_dir, cls.FILE_NAME)
-            with open(target_path, "w", encoding="utf-8") as f:
-                f.write(str(chat_id).strip())
-        except Exception as e:
-            logger.error(f"Failed to save admin chat_id: {e}")
-
-    @classmethod
-    def get_chat_id(cls, base_dir: str) -> Optional[int]:
-        # 1. Check env var
-        env_val = os.getenv("ADMIN_CHAT_ID") or os.getenv("TELEGRAM_ADMIN_CHAT_ID")
-        if env_val and env_val.strip().lstrip("-").isdigit():
-            return int(env_val.strip())
-        # 2. Check persistent file
-        target_path = os.path.join(base_dir, cls.FILE_NAME)
-        if os.path.exists(target_path):
-            try:
-                with open(target_path, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
-                if content and content.lstrip("-").isdigit():
-                    return int(content)
-            except Exception as e:
-                logger.error(f"Failed to read admin chat_id from {target_path}: {e}")
-        return None
+        """NO-OP: Auto-discovery has been permanently removed for security."""
+        pass
 
 
 # ==============================================================================

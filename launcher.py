@@ -1,20 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-VIBECHECK DUAL-BOT CLOUD LAUNCHER & WATCHDOG SUPERVISOR
+VIBECHECK DUAL-BOT CLOUD LAUNCHER & ORCHESTRATION SERVER (ENTERPRISE GRADE)
 Orchestrates:
-1. HTTP Health Check Server (Port 8080 or $PORT) for Render / Cloud health probes
-2. Bot 1 (Maker / CTO Thực Chiến - bot_auditor.py)
-3. Bot 2 (Checker / Trọng Tài Phản Biện - bot_redteam.py)
+1. Unified HTTP Server (Port 8080 or $PORT):
+   - GET /healthz: Real health probe (200 on healthy components, 503 on failure)
+   - GET /readyz: Readiness check
+   - GET /: Service liveness landing
+   - POST /webhook/bot1: High-throughput, low-latency webhook for Bot 1 (CTO @thamdinh_ai_bot)
+   - POST /webhook/bot2: High-throughput, low-latency webhook for Bot 2 (RedTeam @vibecheck_redteam_bot)
+2. Background Worker Pool for Fast ACK (<50ms)
+3. Cryptographic Webhook Header Secret Validation (X-Telegram-Bot-Api-Secret-Token)
+4. Proactive Escalation Daemon Integration
+5. Zero-Cost 24/7 Keep-Alive Worker for Render Free Web Service
 """
 
 import os
 import sys
 import time
+import json
 import signal
+import hashlib
 import threading
-import subprocess
 import logging
+import concurrent.futures
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Optional, Dict, Any
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -22,123 +32,326 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 logging.basicConfig(
-    format="%(asctime)s - [SUPERVISOR] - %(message)s",
+    format="%(asctime)s - [LAUNCHER] - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger("DualBotLauncher")
 
-# Disable internal health server in child bot_auditor to prevent port collisions
+# Disable internal health server in child modules
 os.environ["DISABLE_INTERNAL_HEALTH_SERVER"] = "1"
 
 PORT = int(os.getenv("PORT", "8080"))
 SHUTDOWN_REQUESTED = False
 
-class HealthHandler(BaseHTTPRequestHandler):
+# Global state for health monitoring
+HEALTH_STATE: Dict[str, Any] = {
+    "status": "starting",
+    "start_time": time.time(),
+    "bot1_ready": False,
+    "bot2_ready": False,
+    "webhook_mode": False,
+    "last_error": None,
+    "processed_updates_bot1": 0,
+    "processed_updates_bot2": 0
+}
+
+# Concurrency Worker Pool (fast ACK < 50ms, processing offloaded to threads)
+WORKER_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="WebhookWorker")
+
+bot1_instance = None
+bot2_instance = None
+webhook_secret_token = ""
+
+
+def get_derived_secret_token() -> str:
+    """Generates or retrieves deterministic secret token for Telegram webhook validation."""
+    env_secret = os.getenv("WEBHOOK_SECRET_TOKEN")
+    if env_secret and len(env_secret.strip()) >= 16:
+        return env_secret.strip()
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "default_secret")
+    admin_id = os.getenv("ADMIN_CHAT_ID", "default_admin")
+    return hashlib.sha256(f"{bot_token}:{admin_id}:vibecheck_secret".encode()).hexdigest()[:32]
+
+
+class UnifiedServerHandler(BaseHTTPRequestHandler):
+    server_version = "VibeCheckServer/3.0"
+
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"VibeCheck Dual-Bot System Live (Bot 1: CTO | Bot 2: RedTeam)\n")
+        global HEALTH_STATE
+        path = self.path.split("?")[0]
+
+        if path in ("/healthz", "/health"):
+            is_healthy = HEALTH_STATE.get("bot1_ready", False) and (HEALTH_STATE.get("bot2_ready", False) or not os.getenv("TELEGRAM_BOT_2_TOKEN"))
+            status_code = 200 if is_healthy else 503
+
+            payload = {
+                "status": "healthy" if is_healthy else "unhealthy",
+                "service": "vibecheck-dual-bot",
+                "uptime_seconds": int(time.time() - HEALTH_STATE["start_time"]),
+                "bot1_ready": HEALTH_STATE.get("bot1_ready", False),
+                "bot2_ready": HEALTH_STATE.get("bot2_ready", False),
+                "webhook_mode": HEALTH_STATE.get("webhook_mode", False),
+                "processed_bot1": HEALTH_STATE.get("processed_updates_bot1", 0),
+                "processed_bot2": HEALTH_STATE.get("processed_updates_bot2", 0)
+            }
+            if HEALTH_STATE.get("last_error"):
+                payload["last_error"] = str(HEALTH_STATE["last_error"])
+
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            return
+
+        elif path in ("/readyz", "/ready"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b'{"status": "ready"}')
+            return
+
+        elif path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"VibeCheck Dual-Bot System Live (Bot 1: CTO @thamdinh_ai_bot | Bot 2: RedTeam @vibecheck_redteam_bot)\n")
+            return
+
+        else:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"Not Found\n")
+
+    def do_POST(self):
+        global bot1_instance, bot2_instance, webhook_secret_token, HEALTH_STATE
+        path = self.path.split("?")[0]
+
+        if path in ("/webhook/bot1", "/webhook/bot2"):
+            # 1. Check Secret Token Header
+            client_secret = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if webhook_secret_token and client_secret != webhook_secret_token:
+                logger.warning(f"⛔ Unauthorized Webhook POST request rejected at {path}: Invalid secret token header.")
+                self.send_response(403)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Forbidden: Invalid secret token\n")
+                return
+
+            # 2. Read Request Body
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > 10 * 1024 * 1024:  # 10MB guard
+                self.send_response(413)
+                self.end_headers()
+                return
+
+            post_data = self.rfile.read(content_length).decode("utf-8")
+
+            # 3. Fast ACK (<50ms): Respond HTTP 200 OK immediately to Telegram
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+            # 4. Offload Update Processing to Worker Pool
+            try:
+                update_json = json.loads(post_data)
+                import telebot
+                update = telebot.types.Update.de_json(update_json)
+                if not update:
+                    return
+
+                if path == "/webhook/bot1" and bot1_instance:
+                    HEALTH_STATE["processed_updates_bot1"] += 1
+                    WORKER_POOL.submit(bot1_instance.process_new_updates, [update])
+                elif path == "/webhook/bot2" and bot2_instance:
+                    HEALTH_STATE["processed_updates_bot2"] += 1
+                    WORKER_POOL.submit(bot2_instance.process_new_updates, [update])
+            except Exception as e:
+                logger.error(f"Error dispatching webhook update: {e}")
+                HEALTH_STATE["last_error"] = str(e)
+            return
+
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def log_message(self, format, *args):
-        pass
+        # Suppress routine health check log spam
+        if args and len(args) > 0 and any(p in str(args[0]) for p in ["/healthz", "/readyz", "KeepAlive"]):
+            return
+        logger.debug("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), format % args))
 
-def start_health_server(port):
-    try:
-        server = HTTPServer(("0.0.0.0", port), HealthHandler)
-        logger.info(f"✅ HTTP Health Server đang hoạt động tại cổng {port}")
-        server.serve_forever()
-    except Exception as e:
-        logger.error(f"⚠️ Health Server exception: {e}")
 
-def run_bot_supervisor(script_name, bot_display_name):
-    logger.info(f"🚀 Khởi tạo giám sát: {bot_display_name} ({script_name})...")
-    while not SHUTDOWN_REQUESTED:
-        try:
-            cmd = [sys.executable, "-u", script_name]
-            p = subprocess.Popen(cmd)
-            p.wait()
-            if SHUTDOWN_REQUESTED:
-                break
-            logger.warning(f"⚠️ {bot_display_name} đã dừng (Exit code: {p.returncode}). Tự phục hồi sau 3s...")
-            time.sleep(3)
-        except Exception as e:
-            logger.error(f"❌ Lỗi tiến trình {bot_display_name}: {e}")
-            time.sleep(3)
+def start_http_server(port: int) -> HTTPServer:
+    server = HTTPServer(("0.0.0.0", port), UnifiedServerHandler)
+    logger.info(f"✅ Unified HTTP Server listening on port {port}")
+    return server
 
-def keep_alive_worker(app_url="https://vibecheck-ai-bot.onrender.com", interval_sec=600):
+
+def keep_alive_worker(app_url: str, interval_sec: int = 600):
     """
-    CƠ CHẾ TỰ ĐỘNG CHỐNG NGỦ ĐÔNG RENDER FREE (24/7 ZERO-COST KEEP-ALIVE):
-    Render Free Web Service tự động tắt (sleep) sau 15 phút không có Inbound HTTP traffic.
-    Worker này định kỳ 10 phút gửi 1 request qua Internet đến domain công khai của chính nó,
-    kích hoạt edge router của Render và reset bộ đếm 15 phút, duy trì bot sống liên tục 24/7!
+    Render Free Web Service Keep-Alive:
+    Pings the public /healthz endpoint periodically to prevent 15-minute hibernation.
     """
     import requests
-    time.sleep(30)  # Chờ 30s sau khi server khởi động
-    logger.info(f"🛡️ Khởi động Keep-Alive Worker: ping {app_url} mỗi {interval_sec}s...")
+    time.sleep(20)
+    health_url = app_url.rstrip("/") + "/healthz"
+    logger.info(f"🛡️ Keep-Alive Worker initialized: pinging {health_url} every {interval_sec}s...")
     while not SHUTDOWN_REQUESTED:
         try:
             headers = {"User-Agent": "VibeCheck-KeepAlive-Worker/1.0"}
-            r = requests.get(app_url, headers=headers, timeout=20)
-            logger.info(f"💓 Keep-Alive Ping thành công (Status: {r.status_code}) - Chống ngủ đông Render Free.")
+            r = requests.get(health_url, headers=headers, timeout=15)
+            logger.info(f"💓 Keep-Alive Probe Status: {r.status_code}")
         except Exception as e:
-            logger.warning(f"⚠️ Keep-Alive Ping gặp sự cố: {e}")
+            logger.warning(f"⚠️ Keep-Alive Probe warning: {e}")
         time.sleep(interval_sec)
+
 
 def signal_handler(signum, frame):
     global SHUTDOWN_REQUESTED
-    logger.info("Nhận tín hiệu dừng (SIGINT/SIGTERM). Đang tắt hệ thống an toàn...")
+    logger.info("🛑 Received termination signal (SIGINT/SIGTERM). Gracefully shutting down...")
     SHUTDOWN_REQUESTED = True
+    WORKER_POOL.shutdown(wait=False)
     sys.exit(0)
 
+
 def main():
+    global bot1_instance, bot2_instance, webhook_secret_token, HEALTH_STATE
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    logger.info("=" * 60)
-    logger.info("🤖 VIBECHECK DUAL-BOT ORCHESTRATOR (ENTERPRISE CLOUD)")
-    logger.info("• Bot 1: Maker / CTO Thực Chiến (@thamdinh_ai_bot)")
-    logger.info("• Bot 2: Checker / Trọng Tài Phản Biện (@vibecheck_redteam_bot)")
-    logger.info("=" * 60)
+    logger.info("=" * 65)
+    logger.info("🚀 VIBECHECK DUAL-BOT ENTERPRISE ORCHESTRATOR")
+    logger.info("• Bot 1 (CTO / Tech Auditor): @thamdinh_ai_bot")
+    logger.info("• Bot 2 (Red Team Referee): @vibecheck_redteam_bot")
+    logger.info("=" * 65)
 
-    # 1. Khởi động HTTP Health Server
-    health_thread = threading.Thread(target=start_health_server, args=(PORT,), daemon=True, name="HealthServerThread")
-    health_thread.start()
+    webhook_secret_token = get_derived_secret_token()
 
-    # 2. Khởi động Bot 1 (Maker / CTO)
-    t1 = threading.Thread(
-        target=run_bot_supervisor,
-        args=("bot_auditor.py", "Bot 1 (Maker/CTO)"),
-        daemon=True,
-        name="Bot1_Thread"
-    )
-    t1.start()
+    # 1. Initialize Bot 1 (Maker / CTO)
+    try:
+        import bot_auditor
+        bot1_instance = bot_auditor.setup_bot()
+        bot_auditor.bot_proxy.set_bot(bot1_instance)
+        HEALTH_STATE["bot1_ready"] = True
+        logger.info("✅ Bot 1 (Maker / CTO) setup completed.")
 
-    # 3. Khởi động Bot 2 (Checker / RedTeam)
-    t2 = threading.Thread(
-        target=run_bot_supervisor,
-        args=("bot_redteam.py", "Bot 2 (Checker/RedTeam)"),
-        daemon=True,
-        name="Bot2_Thread"
-    )
-    t2.start()
+        # Start Proactive Escalation Worker
+        from escalation_system import start_proactive_escalation_worker
+        start_proactive_escalation_worker(
+            bot=bot_auditor.bot_proxy,
+            backlog_path=bot_auditor.BACKLOG_FILE,
+            base_dir=bot_auditor.BASE_DIR,
+            check_interval_seconds=1800,
+            threshold_hours=12.0,
+            initial_delay_seconds=10
+        )
+        logger.info("✅ Proactive Escalation Worker started for Bot 1.")
+    except Exception as e:
+        logger.error(f"❌ Failed to setup Bot 1: {e}")
+        HEALTH_STATE["last_error"] = f"Bot 1 Setup Error: {e}"
 
-    # 4. Khởi động Keep-Alive Worker chống ngủ đông Render Free (10 phút/lần)
-    keep_alive_url = os.getenv("RENDER_EXTERNAL_URL", "https://vibecheck-ai-bot.onrender.com")
-    ka_thread = threading.Thread(
-        target=keep_alive_worker,
-        args=(keep_alive_url, 600),
-        daemon=True,
-        name="KeepAlive_Thread"
-    )
-    ka_thread.start()
+    # 2. Initialize Bot 2 (Checker / Red Team)
+    bot2_token = os.getenv("TELEGRAM_BOT_2_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN_2")
+    if bot2_token and len(bot2_token.strip()) > 10:
+        try:
+            import bot_redteam
+            bot2_instance = bot_redteam.create_bot()
+            HEALTH_STATE["bot2_ready"] = True
+            logger.info("✅ Bot 2 (Checker / RedTeam) setup completed.")
+        except Exception as e:
+            logger.error(f"❌ Failed to setup Bot 2: {e}")
+            HEALTH_STATE["last_error"] = f"Bot 2 Setup Error: {e}"
+    else:
+        logger.warning("⚠️ TELEGRAM_BOT_2_TOKEN not configured. Bot 2 is inactive.")
 
-    # Giữ luồng chính sống để hứng signals
+    # 3. Start Unified HTTP Server
+    server = start_http_server(PORT)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="HTTPServerThread")
+    server_thread.start()
+
+    # 4. Determine Execution Mode (Webhook vs Polling)
+    is_cloud = os.getenv("RENDER") == "true" or bool(os.getenv("RENDER_EXTERNAL_URL"))
+    force_polling = os.getenv("USE_POLLING") == "1"
+    public_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_URL") or "https://vibecheck-ai-bot.onrender.com"
+
+    if is_cloud and not force_polling:
+        HEALTH_STATE["webhook_mode"] = True
+        logger.info(f"🌐 Activating TELEGRAM WEBHOOK MODE on {public_url}...")
+
+        # Configure Webhooks for Telegram Bots
+        try:
+            if bot1_instance:
+                w1_url = f"{public_url}/webhook/bot1"
+                bot1_instance.set_webhook(
+                    url=w1_url,
+                    secret_token=webhook_secret_token,
+                    drop_pending_updates=False
+                )
+                logger.info(f"✅ Bot 1 Webhook configured: {w1_url}")
+
+            if bot2_instance:
+                w2_url = f"{public_url}/webhook/bot2"
+                bot2_instance.set_webhook(
+                    url=w2_url,
+                    secret_token=webhook_secret_token,
+                    drop_pending_updates=False
+                )
+                logger.info(f"✅ Bot 2 Webhook configured: {w2_url}")
+        except Exception as e:
+            logger.error(f"❌ Webhook configuration error: {e}")
+            HEALTH_STATE["last_error"] = f"Webhook Error: {e}"
+
+        # Start Keep-Alive Worker
+        ka_thread = threading.Thread(
+            target=keep_alive_worker,
+            args=(public_url, 600),
+            daemon=True,
+            name="KeepAlive_Thread"
+        )
+        ka_thread.start()
+
+    else:
+        # Fallback to Polling Mode (local development / debugging)
+        HEALTH_STATE["webhook_mode"] = False
+        logger.info("🔄 Running in LOCAL POLLING MODE (Deleting Webhooks)...")
+        if bot1_instance:
+            try:
+                bot1_instance.delete_webhook()
+            except Exception:
+                pass
+            t1 = threading.Thread(
+                target=lambda: bot1_instance.infinity_polling(timeout=90, long_polling_timeout=20),
+                daemon=True,
+                name="Bot1_Polling"
+            )
+            t1.start()
+
+        if bot2_instance:
+            try:
+                bot2_instance.delete_webhook()
+            except Exception:
+                pass
+            t2 = threading.Thread(
+                target=lambda: bot2_instance.infinity_polling(timeout=30, long_polling_timeout=20),
+                daemon=True,
+                name="Bot2_Polling"
+            )
+            t2.start()
+
+    HEALTH_STATE["status"] = "running"
+    logger.info(f"🌟 VibeCheck Dual-Bot System is fully OPERATIONAL on port {PORT}!")
+
+    # Keep Main Thread Alive
     try:
         while not SHUTDOWN_REQUESTED:
             time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Dừng chương trình bởi người dùng.")
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Shutting down launcher.")
+        server.shutdown()
+
 
 if __name__ == "__main__":
     main()
