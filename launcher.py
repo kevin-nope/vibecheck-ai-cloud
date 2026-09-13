@@ -66,6 +66,25 @@ def run_bot_supervisor(script_name, bot_display_name):
             logger.error(f"❌ Lỗi tiến trình {bot_display_name}: {e}")
             time.sleep(3)
 
+def keep_alive_worker(app_url="https://vibecheck-ai-bot.onrender.com", interval_sec=600):
+    """
+    CƠ CHẾ TỰ ĐỘNG CHỐNG NGỦ ĐÔNG RENDER FREE (24/7 ZERO-COST KEEP-ALIVE):
+    Render Free Web Service tự động tắt (sleep) sau 15 phút không có Inbound HTTP traffic.
+    Worker này định kỳ 10 phút gửi 1 request qua Internet đến domain công khai của chính nó,
+    kích hoạt edge router của Render và reset bộ đếm 15 phút, duy trì bot sống liên tục 24/7!
+    """
+    import requests
+    time.sleep(30)  # Chờ 30s sau khi server khởi động
+    logger.info(f"🛡️ Khởi động Keep-Alive Worker: ping {app_url} mỗi {interval_sec}s...")
+    while not SHUTDOWN_REQUESTED:
+        try:
+            headers = {"User-Agent": "VibeCheck-KeepAlive-Worker/1.0"}
+            r = requests.get(app_url, headers=headers, timeout=20)
+            logger.info(f"💓 Keep-Alive Ping thành công (Status: {r.status_code}) - Chống ngủ đông Render Free.")
+        except Exception as e:
+            logger.warning(f"⚠️ Keep-Alive Ping gặp sự cố: {e}")
+        time.sleep(interval_sec)
+
 def signal_handler(signum, frame):
     global SHUTDOWN_REQUESTED
     logger.info("Nhận tín hiệu dừng (SIGINT/SIGTERM). Đang tắt hệ thống an toàn...")
@@ -103,6 +122,16 @@ def main():
         name="Bot2_Thread"
     )
     t2.start()
+
+    # 4. Khởi động Keep-Alive Worker chống ngủ đông Render Free (10 phút/lần)
+    keep_alive_url = os.getenv("RENDER_EXTERNAL_URL", "https://vibecheck-ai-bot.onrender.com")
+    ka_thread = threading.Thread(
+        target=keep_alive_worker,
+        args=(keep_alive_url, 600),
+        daemon=True,
+        name="KeepAlive_Thread"
+    )
+    ka_thread.start()
 
     # Giữ luồng chính sống để hứng signals
     try:
