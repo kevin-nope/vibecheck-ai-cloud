@@ -10,10 +10,135 @@ import time
 import uuid
 import logging
 import threading
+import base64
+import hashlib
+import requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Set, Union
 
+try:
+    from cryptography.fernet import Fernet
+except ImportError:
+    Fernet = None
+
 logger = logging.getLogger("SandboxEscalation")
+
+# ==============================================================================
+# 0. DURABLE CLOUD STORAGE ADAPTER (PERSISTENCE LAYER)
+# ==============================================================================
+
+class DurablePersistenceAdapter:
+    """
+    Minimalist Durable Cloud Storage Adapter for Render Free Ephemeral Filesystem.
+    - Synchronizes 00_ACTION_BACKLOG.md and .reminded_state.json with a persistent remote KV endpoint.
+    - Uses AES-256 (Fernet) encryption derived from ADMIN_CHAT_ID and WEBHOOK_SECRET_TOKEN.
+    - Restores persistent state on startup before any bot handlers begin.
+    - Syncs updated state on any mutation.
+    """
+    _cipher = None
+
+    @classmethod
+    def get_cipher(cls):
+        if cls._cipher is None and Fernet is not None:
+            admin_id = os.getenv("ADMIN_CHAT_ID", "default_admin")
+            secret = os.getenv("WEBHOOK_SECRET_TOKEN", "default_secret")
+            seed = f"{admin_id}:{secret}:durable_vibecheck".encode()
+            key = base64.urlsafe_b64encode(hashlib.sha256(seed).digest())
+            cls._cipher = Fernet(key)
+        return cls._cipher
+
+    @classmethod
+    def get_remote_url(cls) -> Optional[str]:
+        url = (os.getenv("PERSISTENCE_STORE_URL") or "").strip()
+        return url if url.startswith("http") else None
+
+    @classmethod
+    def restore_all(cls, base_dir: str, backlog_file: str, state_file: str) -> bool:
+        """Called on startup: Restores durable state from remote persistent store if available."""
+        remote_url = cls.get_remote_url()
+        if not remote_url:
+            logger.info("DurablePersistence: PERSISTENCE_STORE_URL not configured. Operating on local disk.")
+            return False
+
+        restored_any = False
+        try:
+            cipher = cls.get_cipher()
+
+            # 1. Restore Backlog
+            r_backlog = requests.get(f"{remote_url}/backlog", timeout=5)
+            if r_backlog.status_code == 200 and r_backlog.content:
+                try:
+                    payload = r_backlog.content
+                    content = cipher.decrypt(payload).decode("utf-8") if cipher else payload.decode("utf-8")
+                    if len(content.strip()) > 50:
+                        with open(backlog_file, "w", encoding="utf-8") as f:
+                            f.write(content)
+                        logger.info(f"✅ DurablePersistence: Restored {backlog_file} from persistent store ({len(content)} bytes).")
+                        restored_any = True
+                except Exception as de:
+                    logger.warning(f"DurablePersistence: Failed to decrypt remote backlog: {de}")
+            elif r_backlog.status_code == 404 and os.path.exists(backlog_file):
+                cls.sync_backlog(backlog_file)
+
+            # 2. Restore Reminder State
+            r_state = requests.get(f"{remote_url}/reminded_state", timeout=5)
+            if r_state.status_code == 200 and r_state.content:
+                try:
+                    payload = r_state.content
+                    content = cipher.decrypt(payload).decode("utf-8") if cipher else payload.decode("utf-8")
+                    with open(state_file, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    logger.info(f"✅ DurablePersistence: Restored {state_file} from persistent store.")
+                    restored_any = True
+                except Exception as de:
+                    logger.warning(f"DurablePersistence: Failed to decrypt remote reminder state: {de}")
+            elif r_state.status_code == 404 and os.path.exists(state_file):
+                cls.sync_state(state_file)
+
+            return restored_any
+        except Exception as e:
+            logger.warning(f"DurablePersistence: Failed to restore remote state: {e}")
+            return False
+
+    @classmethod
+    def sync_backlog(cls, backlog_file: str) -> bool:
+        """Pushes encrypted backlog to persistent store."""
+        remote_url = cls.get_remote_url()
+        if not remote_url or not os.path.exists(backlog_file):
+            return False
+        try:
+            cipher = cls.get_cipher()
+            with open(backlog_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            data = cipher.encrypt(content.encode("utf-8")) if cipher else content.encode("utf-8")
+            r = requests.post(f"{remote_url}/backlog", data=data, timeout=5)
+            if r.status_code in (200, 201):
+                logger.info("✅ DurablePersistence: Backlog synced to remote store successfully.")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"DurablePersistence: Failed to sync backlog: {e}")
+            return False
+
+    @classmethod
+    def sync_state(cls, state_file: str) -> bool:
+        """Pushes encrypted reminder state to persistent store."""
+        remote_url = cls.get_remote_url()
+        if not remote_url or not os.path.exists(state_file):
+            return False
+        try:
+            cipher = cls.get_cipher()
+            with open(state_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            data = cipher.encrypt(content.encode("utf-8")) if cipher else content.encode("utf-8")
+            r = requests.post(f"{remote_url}/reminded_state", data=data, timeout=5)
+            if r.status_code in (200, 201):
+                logger.info("✅ DurablePersistence: Reminder state synced to remote store successfully.")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"DurablePersistence: Failed to sync reminder state: {e}")
+            return False
 
 # ==============================================================================
 # 1. ATOMIC FILE LOCK & CRITICAL SECTION HANDLER
@@ -217,6 +342,37 @@ class BacklogManager:
         self.backlog_path = backlog_path
         self.lock_path = backlog_path + ".lock"
 
+    def _atomic_write_lines(self, all_lines: List[str]) -> bool:
+        """Atomic write via temp file, flush, fsync, atomic replace and durable remote sync."""
+        temp_path = f"{self.backlog_path}.tmp.{uuid.uuid4().hex}"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                for line in all_lines:
+                    f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+
+            for replace_attempt in range(5):
+                try:
+                    os.replace(temp_path, self.backlog_path)
+                    DurablePersistenceAdapter.sync_backlog(self.backlog_path)
+                    return True
+                except PermissionError:
+                    if replace_attempt < 4:
+                        time.sleep(0.05)
+                    else:
+                        raise
+            DurablePersistenceAdapter.sync_backlog(self.backlog_path)
+            return True
+        except Exception as e:
+            logger.error(f"Atomic replace failed in BacklogManager: {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            raise
+
     def get_overdue_tasks(self, threshold_hours: float = 24.0, now: Optional[datetime] = None) -> List[BacklogRecord]:
         """Scans for overdue pending tasks without mutating the file."""
         if not os.path.exists(self.backlog_path):
@@ -231,12 +387,7 @@ class BacklogManager:
     def mark_task_completed(self, target_task_id: str) -> bool:
         """
         Critical Section:
-        LOCK → READ → VALIDATE → MODIFY → TEMP WRITE → FLUSH/FSYNC → ATOMIC REPLACE → UNLOCK
-        
-        Guarantees:
-        - Minimal mutation: Only updates status column of matching task row.
-        - Preserves all headers, footers, whitespace, formatting, non-matching rows.
-        - Zero truncation or empty file risk.
+        LOCK → READ → VALIDATE → MODIFY → ATOMIC WRITE → DURABLE SYNC → UNLOCK
         """
         with BacklogFileLock(self.lock_path, timeout=8.0):
             records, all_lines = BacklogParser.parse_file(self.backlog_path)
@@ -253,10 +404,8 @@ class BacklogManager:
 
             orig_line = all_lines[target_record.line_number]
             # Replace "[ ]" with "[x]" inside the status field while preserving column padding
-            # Matches "| [ ] Chờ làm |" or "| [ ] |"
             new_line = re.sub(r"(\|\s*)\[ \](\s*[^|]*\|)", r"\1[x]\2", orig_line, count=1)
             
-            # If status text was explicitly "Chờ làm", convert to "Hoàn thành" if desired, or just "[x]"
             if "[ ]" in orig_line and "[x]" in new_line:
                 if "Chờ làm" in new_line:
                     new_line = new_line.replace("Chờ làm", "Hoàn thành")
@@ -265,35 +414,7 @@ class BacklogManager:
                 return False
 
             all_lines[target_record.line_number] = new_line
-
-            # Atomic Write: Write to temp file on same directory, flush, fsync, atomic replace
-            temp_path = f"{self.backlog_path}.tmp.{uuid.uuid4().hex}"
-            try:
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    for line in all_lines:
-                        f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-                # Retry loop for Windows atomic replace to handle transient file locking
-                for replace_attempt in range(5):
-                    try:
-                        os.replace(temp_path, self.backlog_path)
-                        return True
-                    except PermissionError:
-                        if replace_attempt < 4:
-                            time.sleep(0.05)
-                        else:
-                            raise
-                return True
-            except Exception as e:
-                logger.error(f"Atomic replace failed: {e}. Removing temp file.")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-                raise
+            return self._atomic_write_lines(all_lines)
 
     def cancel_task(self, target_task_id: str) -> bool:
         """
@@ -318,33 +439,7 @@ class BacklogManager:
                 new_line = orig_line.replace("[ ] Chờ làm", "[-] Đã đình chỉ").replace("[ ]", "[-] Đã đình chỉ")
 
             all_lines[target_record.line_number] = new_line
-
-            temp_path = f"{self.backlog_path}.tmp.{uuid.uuid4().hex}"
-            try:
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    for line in all_lines:
-                        f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-                for replace_attempt in range(5):
-                    try:
-                        os.replace(temp_path, self.backlog_path)
-                        return True
-                    except PermissionError:
-                        if replace_attempt < 4:
-                            time.sleep(0.05)
-                        else:
-                            raise
-                return True
-            except Exception as e:
-                logger.error(f"Atomic replace failed in cancel_task: {e}")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-                raise
+            return self._atomic_write_lines(all_lines)
 
     def delete_task(self, target_task_id: str) -> bool:
         """
@@ -365,33 +460,7 @@ class BacklogManager:
 
             # Xóa dòng của task khỏi bảng
             del all_lines[target_record.line_number]
-
-            temp_path = f"{self.backlog_path}.tmp.{uuid.uuid4().hex}"
-            try:
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    for line in all_lines:
-                        f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-                for replace_attempt in range(5):
-                    try:
-                        os.replace(temp_path, self.backlog_path)
-                        return True
-                    except PermissionError:
-                        if replace_attempt < 4:
-                            time.sleep(0.05)
-                        else:
-                            raise
-                return True
-            except Exception as e:
-                logger.error(f"Atomic replace failed in delete_task: {e}")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-                raise
+            return self._atomic_write_lines(all_lines)
 
     def get_active_tasks_summary(self) -> List[Dict[str, str]]:
         """Returns a lightweight summary of all pending tasks for LLM context matching."""
@@ -446,33 +515,9 @@ class BacklogManager:
                     break
             
             all_lines.insert(insert_idx, new_row)
-            
-            temp_path = f"{self.backlog_path}.tmp.{uuid.uuid4().hex}"
-            try:
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    for line in all_lines:
-                        f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-                for replace_attempt in range(5):
-                    try:
-                        os.replace(temp_path, self.backlog_path)
-                        return task_id
-                    except PermissionError:
-                        if replace_attempt < 4:
-                            time.sleep(0.05)
-                        else:
-                            raise
+            if self._atomic_write_lines(all_lines):
                 return task_id
-            except Exception as e:
-                logger.error(f"Failed to add task: {e}")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-                raise
+            return ""
 
     def supersede_task(self, old_task_id: str, new_record_data: Dict[str, str]) -> Tuple[bool, str]:
         """
@@ -528,33 +573,9 @@ class BacklogManager:
                     insert_idx = idx + 1
                     break
             all_lines.insert(insert_idx, new_row)
-            
-            temp_path = f"{self.backlog_path}.tmp.{uuid.uuid4().hex}"
-            try:
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    for line in all_lines:
-                        f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-                for replace_attempt in range(5):
-                    try:
-                        os.replace(temp_path, self.backlog_path)
-                        return True, new_task_id
-                    except PermissionError:
-                        if replace_attempt < 4:
-                            time.sleep(0.05)
-                        else:
-                            raise
+            if self._atomic_write_lines(all_lines):
                 return True, new_task_id
-            except Exception as e:
-                logger.error(f"Failed to supersede task: {e}")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-                raise
+            return False, ""
 
 
 
@@ -720,6 +741,7 @@ class RemindedStateManager:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, indent=2)
             os.replace(temp_file, self.state_file)
+            DurablePersistenceAdapter.sync_state(self.state_file)
         except Exception as e:
             logger.error(f"Failed to save reminded state: {e}")
 

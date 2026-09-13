@@ -16,6 +16,8 @@ services:
         sync: false
       - key: WEBHOOK_SECRET_TOKEN
         sync: false
+      - key: PERSISTENCE_STORE_URL
+        sync: false
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: PYTHONIOENCODING

@@ -3,4 +3,5 @@ google-genai==2.22.0
 requests==2.34.2
 python-dotenv==1.2.3
 urllib3==2.7.0
+cryptography==42.0.8
 

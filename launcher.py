@@ -63,14 +63,26 @@ bot2_instance = None
 webhook_secret_token = ""
 
 
-def get_derived_secret_token() -> str:
-    """Generates or retrieves deterministic secret token for Telegram webhook validation."""
-    env_secret = os.getenv("WEBHOOK_SECRET_TOKEN")
-    if env_secret and len(env_secret.strip()) >= 16:
-        return env_secret.strip()
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "default_secret")
-    admin_id = os.getenv("ADMIN_CHAT_ID", "default_admin")
-    return hashlib.sha256(f"{bot_token}:{admin_id}:vibecheck_secret".encode()).hexdigest()[:32]
+def get_webhook_secret_token() -> str:
+    """
+    Retrieves random independent secret token for Telegram webhook validation.
+    Enforces strict startup fail-fast in production if WEBHOOK_SECRET_TOKEN is not configured.
+    Zero derivation from bot token.
+    """
+    env_secret = (os.getenv("WEBHOOK_SECRET_TOKEN") or "").strip()
+    is_production = os.getenv("RENDER") == "true" or os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PORT")
+    if not env_secret:
+        if is_production:
+            logger.critical("❌ FATAL: WEBHOOK_SECRET_TOKEN is missing in production environment! Halting startup immediately (fail-fast).")
+            sys.exit(1)
+        else:
+            logger.warning("⚠️ Local development mode: WEBHOOK_SECRET_TOKEN is empty. Using dev secret.")
+            return "dev_secret_local_only_12345"
+    if len(env_secret) < 16:
+        if is_production:
+            logger.critical("❌ FATAL: WEBHOOK_SECRET_TOKEN must be at least 16 characters! Halting startup.")
+            sys.exit(1)
+    return env_secret
 
 
 class UnifiedServerHandler(BaseHTTPRequestHandler):
@@ -228,7 +240,19 @@ def main():
     logger.info("• Bot 2 (Red Team Referee): @vibecheck_redteam_bot")
     logger.info("=" * 65)
 
-    webhook_secret_token = get_derived_secret_token()
+    webhook_secret_token = get_webhook_secret_token()
+
+    # 0. Restore Durable Persistence (Backlog & Reminder State) before starting bots
+    try:
+        from escalation_system import DurablePersistenceAdapter
+        import bot_auditor
+        DurablePersistenceAdapter.restore_all(
+            base_dir=bot_auditor.BASE_DIR,
+            backlog_file=bot_auditor.BACKLOG_FILE,
+            state_file=os.path.join(bot_auditor.BASE_DIR, ".reminded_state.json")
+        )
+    except Exception as e:
+        logger.warning(f"DurablePersistence startup restore warning: {e}")
 
     # 1. Initialize Bot 1 (Maker / CTO)
     try:

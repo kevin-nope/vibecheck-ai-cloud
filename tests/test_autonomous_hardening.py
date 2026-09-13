@@ -26,7 +26,7 @@ os.environ["PORT"] = "10000"
 import bot_auditor
 import bot_redteam
 import launcher
-from escalation_system import AdminChatIDManager, BacklogManager
+from escalation_system import AdminChatIDManager, BacklogManager, DurablePersistenceAdapter
 
 class TestAutonomousHardening(unittest.TestCase):
 
@@ -217,6 +217,83 @@ class TestAutonomousHardening(unittest.TestCase):
 
         handler.do_GET()
         handler.send_response.assert_called_with(200)
+
+    def test_12_webhook_secret_fail_fast_on_missing_in_prod(self):
+        """Production must fail-fast if WEBHOOK_SECRET_TOKEN is missing."""
+        with patch.dict(os.environ, {"RENDER": "true", "WEBHOOK_SECRET_TOKEN": ""}):
+            with self.assertRaises(SystemExit) as cm:
+                launcher.get_webhook_secret_token()
+            self.assertEqual(cm.exception.code, 1)
+
+    def test_13_webhook_secret_uses_independent_env_secret(self):
+        """Production uses independent secret from env, zero derivation from bot token."""
+        with patch.dict(os.environ, {"WEBHOOK_SECRET_TOKEN": "independent_random_secret_token_123456"}):
+            token = launcher.get_webhook_secret_token()
+            self.assertEqual(token, "independent_random_secret_token_123456")
+
+    def test_14_persistence_sync_and_restart_simulation(self):
+        """Durable Persistence: State is encrypted, synced to remote store, and restored after container wipe."""
+        fake_remote_kv = {}
+
+        def fake_post(url, data=None, timeout=None):
+            key = url.split("/")[-1]
+            fake_remote_kv[key] = data
+            m = MagicMock()
+            m.status_code = 200
+            return m
+
+        def fake_get(url, timeout=None):
+            key = url.split("/")[-1]
+            m = MagicMock()
+            if key in fake_remote_kv:
+                m.status_code = 200
+                m.content = fake_remote_kv[key]
+            else:
+                m.status_code = 404
+                m.content = b""
+            return m
+
+        test_backlog = "test_backlog_durable.md"
+        test_state = "test_state_durable.json"
+
+        initial_content = """# MASTER BACKLOG
+| Task ID | Ngày | Công Nghệ | Trụ Cột | Việc Cần Làm | Ưu Tiên | Trạng Thái | Link |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| TASK-20260913-0099 | 2026-09-13 10:00 | DurableTool | Core | Test Persistence | 🔴 P1 | [ ] Chờ làm | [Link](a) |
+"""
+        with open(test_backlog, "w", encoding="utf-8") as f:
+            f.write(initial_content)
+
+        try:
+            with patch.dict(os.environ, {"PERSISTENCE_STORE_URL": "https://mock.kv/store"}), \
+                 patch("requests.post", side_effect=fake_post), \
+                 patch("requests.get", side_effect=fake_get):
+
+                # 1. Sync to remote
+                mgr = BacklogManager(test_backlog)
+                res = mgr.mark_task_completed("TASK-20260913-0099")
+                self.assertTrue(res)
+                self.assertIn("backlog", fake_remote_kv)
+
+                # 2. Simulate Render Restart (Container wiped, local file deleted)
+                os.remove(test_backlog)
+                self.assertFalse(os.path.exists(test_backlog))
+
+                # 3. Simulate Container Boot (restore_all called)
+                restored = DurablePersistenceAdapter.restore_all(".", test_backlog, test_state)
+                self.assertTrue(restored)
+                self.assertTrue(os.path.exists(test_backlog))
+
+                with open(test_backlog, "r", encoding="utf-8") as f:
+                    restored_content = f.read()
+
+                self.assertIn("TASK-20260913-0099", restored_content)
+                self.assertIn("[x] Hoàn thành", restored_content)
+        finally:
+            if os.path.exists(test_backlog):
+                os.remove(test_backlog)
+            if os.path.exists(test_state):
+                os.remove(test_state)
 
 if __name__ == "__main__":
     unittest.main()
