@@ -530,6 +530,20 @@ class BacklogManager:
             
             all_lines.insert(insert_idx, new_row)
             if self._atomic_write_lines(all_lines):
+                try:
+                    from google_sheet_sync import GoogleSheetSyncAdapter
+                    GoogleSheetSyncAdapter.sync_record_async({
+                        "task_id": task_id,
+                        "date_str": date_col,
+                        "tool_name": tool_col,
+                        "pillar": pillar_col,
+                        "action_item": action_col,
+                        "priority": prio_col,
+                        "status": status_col,
+                        "link": file_col
+                    })
+                except Exception as gse:
+                    logger.warning(f"GoogleSheetSync dispatch error in add_task: {gse}")
                 return task_id
             return ""
 
@@ -588,6 +602,30 @@ class BacklogManager:
                     break
             all_lines.insert(insert_idx, new_row)
             if self._atomic_write_lines(all_lines):
+                try:
+                    from google_sheet_sync import GoogleSheetSyncAdapter
+                    GoogleSheetSyncAdapter.sync_record_async({
+                        "task_id": old_task_id,
+                        "date_str": target_record.date_str,
+                        "tool_name": target_record.tool_name,
+                        "pillar": target_record.pillar,
+                        "action_item": target_record.action_item,
+                        "priority": target_record.priority,
+                        "status": f"[~] Thay thế bởi {new_task_id}",
+                        "link": target_record.report_link
+                    })
+                    GoogleSheetSyncAdapter.sync_record_async({
+                        "task_id": new_task_id,
+                        "date_str": date_col,
+                        "tool_name": tool_col,
+                        "pillar": pillar_col,
+                        "action_item": action_col,
+                        "priority": prio_col,
+                        "status": status_col,
+                        "link": file_col
+                    })
+                except Exception as gse:
+                    logger.warning(f"GoogleSheetSync dispatch error in supersede_task: {gse}")
                 return True, new_task_id
             return False, ""
 

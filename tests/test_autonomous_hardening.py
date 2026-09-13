@@ -12,6 +12,7 @@ Comprehensive Test Suite for Autonomous Production Hardening:
 import os
 import sys
 import time
+import json
 import unittest
 from unittest.mock import patch, MagicMock
 import telebot
@@ -458,6 +459,111 @@ class TestAutonomousHardening(unittest.TestCase):
         handler.path = f"/saved.json?key={secret}"
         handler.do_GET()
         handler.send_response.assert_called_with(200)
+
+    def test_20_google_sheet_schema_and_mapping(self):
+        """Google Sheet Schema: Mapping conforms strictly to 7 columns without Task Manager fields."""
+        from google_sheet_sync import GoogleSheetSyncAdapter, SHEET_COLUMNS
+        from escalation_system import BacklogParser
+
+        self.assertEqual(len(SHEET_COLUMNS), 7)
+        self.assertEqual(SHEET_COLUMNS, [
+            "ID", "Ngày lưu", "Nguồn", "Tiêu đề", "Tóm tắt", "Kết quả Red Team", "Ghi chú"
+        ])
+
+        records, _ = BacklogParser.parse_file("00_ACTION_BACKLOG.md")
+        self.assertEqual(len(records), 5)
+        for r in records:
+            row = GoogleSheetSyncAdapter.record_to_row(r)
+            self.assertEqual(len(row), 7)
+            self.assertEqual(row[0], r.task_id)
+            # Verify no task manager fields
+            row_str = " ".join(row).lower()
+            self.assertNotIn("deadline", row_str)
+            self.assertNotIn("due date", row_str)
+            self.assertNotIn("overdue", row_str)
+            self.assertNotIn("snooze", row_str)
+
+    def test_21_google_sheet_duplicate_protection(self):
+        """Google Sheet Idempotency: Re-syncing existing Task ID updates row without appending duplicate."""
+        from google_sheet_sync import GoogleSheetSyncAdapter
+        mock_service = MagicMock()
+        mock_values = mock_service.spreadsheets.return_value.values.return_value
+
+        # Mock existing sheet containing 1 item
+        existing_row = ["TASK-20260910-001", "2026-09-10", "Tool A", "Pillar", "Action", "Approved", "Notes"]
+        mock_values.get.return_value.execute.return_value = {
+            "values": [
+                ["ID", "Ngày lưu", "Nguồn", "Tiêu đề", "Tóm tắt", "Kết quả Red Team", "Ghi chú"],
+                existing_row
+            ]
+        }
+
+        # Attempt to sync the exact same task ID
+        new_row = ["TASK-20260910-001", "2026-09-10", "Tool A", "Pillar", "Updated Action", "Approved", "New Notes"]
+        ok = GoogleSheetSyncAdapter._sync_via_api(mock_service, "test_sheet_id", new_row)
+        self.assertTrue(ok)
+
+        # Must call update on row 2, NOT append
+        mock_values.update.assert_called_once()
+        update_call = mock_values.update.call_args
+        self.assertIn("Sheet1!A2:G2", update_call.kwargs.get("range", update_call.args[0] if update_call.args else ""))
+        mock_values.append.assert_not_called()
+
+    def test_22_google_sheet_failure_isolation(self):
+        """Google Sheet Isolation: API failure (timeout/429/500) never crashes bot or mutates canonical backlog."""
+        from google_sheet_sync import GoogleSheetSyncAdapter, QUEUE_FILE
+        # Ensure clean queue
+        if os.path.exists(QUEUE_FILE):
+            os.remove(QUEUE_FILE)
+
+        # Force failure by using invalid sheet ID or mocked failure
+        mock_service = MagicMock()
+        mock_service.spreadsheets.return_value.values.return_value.get.side_effect = Exception("Google API 429 Quota Exceeded")
+
+        row = ["TASK-TEST-001", "2026-09-13", "Test Tool", "Pillar", "Action", "Result", "Notes"]
+        # Must catch exception and return False without raising
+        result = GoogleSheetSyncAdapter.sync_record(row)
+        self.assertFalse(result)
+
+        # Must be safely queued in offline queue file
+        self.assertTrue(os.path.exists(QUEUE_FILE))
+        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+            queue = json.load(f)
+        self.assertIn("TASK-TEST-001", queue)
+
+        # Clean up queue
+        if os.path.exists(QUEUE_FILE):
+            os.remove(QUEUE_FILE)
+
+    def test_23_google_sheet_flush_queue(self):
+        """Google Sheet Recovery: Offline queue flushes when connection is restored."""
+        from google_sheet_sync import GoogleSheetSyncAdapter, QUEUE_FILE
+        # Write 1 pending item to queue
+        queue_data = {
+            "TASK-TEST-RECOVER": ["TASK-TEST-RECOVER", "2026-09-13", "Recover Tool", "Pillar", "Action", "Result", "Notes"]
+        }
+        with open(QUEUE_FILE, "w", encoding="utf-8") as f:
+            json.dump(queue_data, f)
+
+        # Mock successful sync
+        with patch.object(GoogleSheetSyncAdapter, "sync_record", return_value=True):
+            flushed = GoogleSheetSyncAdapter.flush_pending_queue()
+            self.assertEqual(flushed, 1)
+
+        # Verify queue file now empty
+        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+            remaining = json.load(f)
+        self.assertEqual(remaining, {})
+
+        if os.path.exists(QUEUE_FILE):
+            os.remove(QUEUE_FILE)
+
+    def test_24_reminders_remain_permanently_dead(self):
+        """Zero Regression: Reminders must be 100% disabled."""
+        from escalation_system import dispatch_overdue_alerts, start_proactive_escalation_worker, RemindedStateManager
+        self.assertEqual(dispatch_overdue_alerts(MagicMock(), "00_ACTION_BACKLOG.md", ".", force=True), [])
+        self.assertIsNone(start_proactive_escalation_worker(MagicMock(), "00_ACTION_BACKLOG.md", "."))
+        self.assertFalse(RemindedStateManager(".").is_enabled())
 
 if __name__ == "__main__":
     unittest.main()

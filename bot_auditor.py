@@ -1515,6 +1515,10 @@ def setup_bot():
         btn_rs = tele_types.InlineKeyboardButton("🔄 Xóa Chat", callback_data="menu_reset")
         btn_hp = tele_types.InlineKeyboardButton("📖 Hướng Dẫn Sử Dụng", callback_data="menu_help")
         markup.add(btn_bl, btn_wb)
+        sheet_url = os.getenv("GOOGLE_SHEET_URL") or (f"https://docs.google.com/spreadsheets/d/{os.getenv('GOOGLE_SHEET_ID')}/edit" if os.getenv("GOOGLE_SHEET_ID") else None)
+        if sheet_url:
+            btn_gs = tele_types.InlineKeyboardButton("📊 Mở Google Sheet", url=sheet_url)
+            markup.add(btn_gs)
         markup.add(btn_st, btn_rs)
         markup.add(btn_hp)
         return markup
