@@ -1303,7 +1303,10 @@ def safe_delete_message(bot: telebot.TeleBot, chat_id: int, message_id: int):
 # ==============================================================================
 
 def md_to_tg_html(text: str) -> str:
-    """Chuyển đổi Markdown chuẩn của LLM sang định dạng HTML hợp lệ cho Telegram."""
+    """Chuyển đổi Markdown chuẩn của LLM sang định dạng HTML hợp lệ cho Telegram, đồng thời bảo toàn các thẻ HTML Telegram hợp lệ có sẵn."""
+    if not text:
+        return ""
+
     # 1. Bảo vệ các khối code block ```...```
     code_blocks = []
     def save_code_block(m):
@@ -1320,21 +1323,29 @@ def md_to_tg_html(text: str) -> str:
     
     text = re.sub(r"`([^`\n]+)`", save_inline_code, text)
 
-    # 3. Escape HTML (&, <, >)
+    # 3. Bảo vệ các thẻ HTML Telegram hợp lệ có sẵn (tránh double-escape <b>, <i>, <code>, <a href="...">)
+    valid_tags = []
+    def save_valid_tag(m):
+        valid_tags.append(m.group(0))
+        return f"XHTMLTAGX{len(valid_tags)-1}X"
+    valid_tag_pattern = r"(</?(?:b|strong|i|em|u|ins|s|strike|del|span|tg-spoiler|code|pre|blockquote)\b[^>]*>|<a\s+href=[\"'][^\"']+[\"'][^>]*>|</a>)"
+    text = re.sub(valid_tag_pattern, save_valid_tag, text, flags=re.IGNORECASE)
+
+    # 4. Escape HTML (&, <, >) cho phần văn bản thường còn lại
     text = html.escape(text)
 
-    # 4. Tiêu đề Markdown (# Header, ## Header, ### Header) -> <b>Header</b>
+    # 5. Tiêu đề Markdown (# Header, ## Header, ### Header) -> <b>Header</b>
     text = re.sub(r"^(?:#{1,6})\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
 
-    # 5. In đậm: **text** hoặc __text__ -> <b>text</b>
+    # 6. In đậm: **text** hoặc __text__ -> <b>text</b>
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
 
-    # 6. In nghiêng: *text* hoặc _text_ (khi không phải bullet point)
+    # 7. In nghiêng: *text* hoặc _text_ (khi không phải bullet point)
     text = re.sub(r"(?<![\*\w])\*([^\*\n]+?)\*(?![\*\w])", r"<i>\1</i>", text)
     text = re.sub(r"(?<![_\w])_([^_\n]+?)_(?![_\w])", r"<i>\1</i>", text)
 
-    # 7. Blockquote: > text -> <blockquote>text</blockquote>
+    # 8. Blockquote: > text -> <blockquote>text</blockquote>
     def convert_blockquote(match):
         lines = match.group(0).split("\n")
         clean_lines = [re.sub(r"^&gt;\s?", "", l) for l in lines if l.strip()]
@@ -1343,25 +1354,29 @@ def md_to_tg_html(text: str) -> str:
         return f"<blockquote>{chr(10).join(clean_lines)}</blockquote>"
     text = re.sub(r"(?:^&gt;.*(?:\n|$))+", convert_blockquote, text, flags=re.MULTILINE)
 
-    # 8. Link Markdown: [title](url) -> <a href="url">title</a>
+    # 9. Link Markdown: [title](url) -> <a href="url">title</a>
     def convert_link(match):
         title = match.group(1)
         url = match.group(2)
         return f'<a href="{url}">{title}</a>'
     text = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", convert_link, text)
 
-    # 9. Phục hồi Inline code
+    # 10. Phục hồi Inline code
     for i, code in enumerate(inline_codes):
         text = text.replace(f"XINLINECODEX{i}X", f"<code>{html.escape(code)}</code>")
 
-    # 10. Phục hồi Code blocks
+    # 11. Phục hồi Code blocks
     for i, code in enumerate(code_blocks):
         text = text.replace(f"XCODEBLOCKX{i}X", f"<pre><code>{html.escape(code)}</code></pre>")
+
+    # 12. Phục hồi các thẻ HTML hợp lệ
+    for i, tag in enumerate(valid_tags):
+        text = text.replace(f"XHTMLTAGX{i}X", tag)
 
     return text
 
 
-def send_long_message(bot: telebot.TeleBot, chat_id: int, text: str, reply_to_message_id=None, reply_markup=None):
+def send_long_message(bot: telebot.TeleBot, chat_id: int, text: str, reply_to_message_id=None, reply_markup=None, is_html=False):
     """Gửi tin nhắn Telegram bằng HTML parse_mode chuẩn, tự động chia nhỏ nếu quá 3800 ký tự."""
     if not text or not str(text).strip():
         return
@@ -1393,7 +1408,7 @@ def send_long_message(bot: telebot.TeleBot, chat_id: int, text: str, reply_to_me
         markup = reply_markup if i == len(parts) - 1 else None
         rep_id = reply_to_message_id if i == 0 else None
         
-        html_part = md_to_tg_html(part)
+        html_part = part if is_html else md_to_tg_html(part)
         try:
             bot.send_message(
                 chat_id,
@@ -1406,15 +1421,18 @@ def send_long_message(bot: telebot.TeleBot, chat_id: int, text: str, reply_to_me
         except Exception as e:
             print(f"Lỗi khi gửi tin nhắn dạng HTML ({e}), fallback sang tin nhắn thường...", flush=True)
             try:
+                # Nếu gửi HTML lỗi, strip HTML tags cơ bản rồi gửi fallback
+                clean_fallback = re.sub(r"<[^>]+>", "", part) if is_html else part
                 bot.send_message(
                     chat_id,
-                    part,
+                    clean_fallback,
                     reply_to_message_id=rep_id,
                     reply_markup=markup,
                     disable_web_page_preview=True
                 )
             except Exception as e2:
                 print(f"Lỗi gửi tin nhắn fallback: {e2}", flush=True)
+        time.sleep(0.3)
         time.sleep(0.3)
 
 
@@ -1783,15 +1801,33 @@ def setup_bot():
             return
 
         if clean_lower in ["🌐 mở web / sheet", "mở web", "mở sheet", "sheet", "web"]:
-            send_long_message(
-                bot, chat_id,
+            url_web = get_saved_archive_url()
+            escaped_url = html.escape(url_web)
+            csv_url = get_saved_archive_url('.csv')
+            escaped_csv = html.escape(csv_url)
+            
+            web_msg = (
                 "🌐 <b>KHO LƯU TRỮ CÔNG NGHỆ TẬP TRUNG (PRIVATE):</b>\n\n"
                 "• <b>Mở trên trình duyệt điện thoại / máy tính</b>:\n"
-                f"👉 {get_saved_archive_url()}\n\n"
+                f'👉 <a href="{escaped_url}">{escaped_url}</a>\n\n'
                 "• <b>Tải file CSV (mở offline hoặc import vào Google Sheets)</b>:\n"
-                f"👉 {get_saved_archive_url('.csv')}\n\n"
-                "<i>(Kho lưu trữ riêng tư chỉ dành cho Founder. Không nhắc việc, không spam Telegram)</i>"
+                f'👉 <a href="{escaped_csv}">{escaped_csv}</a>\n\n'
             )
+            from google_sheet_sync import GoogleSheetSyncAdapter
+            sheet_url = GoogleSheetSyncAdapter.get_sheet_url()
+            if sheet_url:
+                escaped_sheet = html.escape(sheet_url)
+                web_msg += (
+                    "• <b>Bảng tính Google Sheet (Private)</b>:\n"
+                    f'👉 <a href="{escaped_sheet}">{escaped_sheet}</a>\n\n'
+                )
+            web_msg += "<i>(Kho lưu trữ riêng tư chỉ dành cho Founder. Không nhắc việc, không spam Telegram)</i>"
+            
+            markup = tele_types.InlineKeyboardMarkup(row_width=1)
+            markup.add(tele_types.InlineKeyboardButton("🌐 Mở Kho Lưu Trữ (Web)", url=url_web))
+            if sheet_url:
+                markup.add(tele_types.InlineKeyboardButton("📊 Mở Google Sheet", url=sheet_url))
+            send_long_message(bot, chat_id, web_msg, reply_markup=markup, is_html=True)
             return
 
         if clean_lower in ["🔔 nhắc việc ngay", "🔔 nhắc việc ngay (/remind_now)", "/remind_now", "remind_now", "check_overdue", "/check_overdue"]:
@@ -2135,25 +2171,71 @@ def setup_bot():
                 send_long_message(bot, chat_id, "📂 Hiện chưa có giải pháp hoặc công nghệ nào được lưu trong kho lưu trữ.")
                 return
 
-            msg = f"📂 <b>KHO LƯU TRỮ CÔNG NGHỆ & GIẢI PHÁP TẬP TRUNG ({len(records)} mục):</b>\n\n"
-            msg += f"🌐 <b>Xem trực tuyến (Web riêng tư)</b>:\n👉 {get_saved_archive_url()}\n\n"
+            archive_url = get_saved_archive_url()
+            escaped_url = html.escape(archive_url)
 
-            markup = tele_types.InlineKeyboardMarkup(row_width=2)
-            btn_web = tele_types.InlineKeyboardButton("🌐 Mở Kho Lưu Trữ (Web)", url=get_saved_archive_url())
-            markup.add(btn_web)
+            header_html = (
+                f"📂 <b>KHO LƯU TRỮ CÔNG NGHỆ &amp; GIẢI PHÁP TẬP TRUNG ({len(records)} mục):</b>\n\n"
+                f"🌐 <b>Xem trực tuyến (Web riêng tư)</b>:\n"
+                f'👉 <a href="{escaped_url}">{escaped_url}</a>\n\n'
+            )
 
-            for idx, r in enumerate(records[:6], 1):
-                msg += (
-                    f"<b>{idx}. {r.tool_name}</b> (<code>{r.task_id}</code>)\n"
-                    f"• <i>Trụ cột</i>: {r.pillar}\n"
-                    f"• <i>Nội dung</i>: {r.action_item}\n"
-                    f"• <i>Trạng thái</i>: {r.status} | <i>Thời gian</i>: {r.date_str}\n\n"
+            from google_sheet_sync import GoogleSheetSyncAdapter
+            sheet_url = GoogleSheetSyncAdapter.get_sheet_url()
+            if sheet_url:
+                escaped_sheet_url = html.escape(sheet_url)
+                header_html += f'📊 <b>Google Sheet (Private)</b>:\n👉 <a href="{escaped_sheet_url}">{escaped_sheet_url}</a>\n\n'
+
+            footer_html = "💡 <i>Bot không tự động nhắc lại các mục này. Sếp có thể tự mở kho lưu trữ bất kỳ lúc nào để xem lại hoặc đưa cho AI khác kiểm tra khi cần triển khai.</i>"
+
+            MAX_CHUNK = 3500
+            chunks = []
+            current_text = header_html
+            current_buttons = []
+
+            for idx, r in enumerate(records, 1):
+                e_tool = html.escape(str(r.tool_name or "N/A"))
+                e_id = html.escape(str(r.task_id or "N/A"))
+                e_pillar = html.escape(str(r.pillar or "N/A"))
+                e_action = html.escape(str(r.action_item or "N/A"))
+                e_status = html.escape(str(r.status or "N/A"))
+                e_date = html.escape(str(r.date_str or "N/A"))
+
+                item_html = (
+                    f"<b>{idx}. {e_tool}</b> (<code>{e_id}</code>)\n"
+                    f"• <i>Trụ cột</i>: {e_pillar}\n"
+                    f"• <i>Nội dung</i>: {e_action}\n"
+                    f"• <i>Trạng thái</i>: {e_status} | <i>Thời gian</i>: {e_date}\n\n"
                 )
                 btn_prompt = tele_types.InlineKeyboardButton(f"⚡ Prompt #{idx}", callback_data=f"agp_{r.task_id}")
-                markup.add(btn_prompt)
 
-            msg += "💡 <i>Bot không tự động nhắc lại các mục này. Sếp có thể tự mở kho lưu trữ bất kỳ lúc nào để xem lại hoặc đưa cho AI khác kiểm tra khi cần triển khai.</i>"
-            send_long_message(bot, chat_id, msg, reply_markup=markup)
+                is_last = (idx == len(records))
+                needed_len = len(current_text) + len(item_html) + (len(footer_html) if is_last else 0)
+
+                if needed_len > MAX_CHUNK and current_buttons:
+                    chunks.append((current_text.strip(), current_buttons))
+                    current_text = f"📂 <b>KHO LƯU TRỮ CÔNG NGHỆ (tiếp theo):</b>\n\n" + item_html
+                    current_buttons = [btn_prompt]
+                else:
+                    current_text += item_html
+                    current_buttons.append(btn_prompt)
+
+            current_text += footer_html
+            chunks.append((current_text.strip(), current_buttons))
+
+            for c_idx, (chunk_text, chunk_btns) in enumerate(chunks, 1):
+                markup = tele_types.InlineKeyboardMarkup(row_width=2)
+                if c_idx == 1:
+                    btn_web = tele_types.InlineKeyboardButton("🌐 Mở Kho Lưu Trữ (Web)", url=archive_url)
+                    markup.add(btn_web)
+                    if sheet_url:
+                        btn_sheet = tele_types.InlineKeyboardButton("📊 Mở Google Sheet", url=sheet_url)
+                        markup.add(btn_sheet)
+                
+                for i in range(0, len(chunk_btns), 2):
+                    markup.row(*chunk_btns[i:i+2])
+
+                send_long_message(bot, chat_id, chunk_text, reply_markup=markup, is_html=True)
         except Exception as e:
             send_long_message(bot, chat_id, f"⚠️ Lỗi đọc kho lưu trữ: {e}")
 

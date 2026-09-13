@@ -215,15 +215,18 @@ class GoogleSheetSyncAdapter:
                 body = res.read().decode("utf-8")
                 try:
                     resp_json = json.loads(body)
-                    if resp_json.get("status") == "success":
+                    app_status = resp_json.get("status")
+                    app_code = resp_json.get("code")
+                    if app_status == "success" or (app_code == 200 and app_status != "error"):
                         logger.info(f"✅ GoogleSheetSync: Synced {row_data[0]} via Webhook.")
                         return True
                     else:
-                        logger.warning(f"GoogleSheetSync: Webhook returned error: {resp_json}")
+                        logger.warning(f"GoogleSheetSync: Webhook application-level error (code: {app_code}, status: {app_status}, message: {resp_json.get('message')})")
+                        cls._enqueue_pending(row_data[0], row_data)
                         return False
                 except Exception:
                     if res.status in (200, 201):
-                        logger.info(f"✅ GoogleSheetSync: Synced {row_data[0]} via Webhook (status {res.status}).")
+                        logger.info(f"✅ GoogleSheetSync: Synced {row_data[0]} via Webhook (transport status {res.status}).")
                         return True
         except Exception as e:
             logger.warning(f"GoogleSheetSync: Webhook request failed: {e}")
