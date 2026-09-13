@@ -234,14 +234,13 @@ def main():
     try:
         import bot_auditor
         bot1_instance = bot_auditor.setup_bot()
-        bot_auditor.bot_proxy.set_bot(bot1_instance)
         HEALTH_STATE["bot1_ready"] = True
         logger.info("✅ Bot 1 (Maker / CTO) setup completed.")
 
         # Start Proactive Escalation Worker
         from escalation_system import start_proactive_escalation_worker
         start_proactive_escalation_worker(
-            bot=bot_auditor.bot_proxy,
+            bot=bot1_instance,
             backlog_path=bot_auditor.BACKLOG_FILE,
             base_dir=bot_auditor.BASE_DIR,
             check_interval_seconds=1800,
