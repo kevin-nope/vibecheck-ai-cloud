@@ -1480,9 +1480,8 @@ def setup_bot():
     try:
         bot.set_my_commands([
             tele_types.BotCommand("menu", "🎛️ Bảng điều khiển tác vụ nhanh"),
-            tele_types.BotCommand("backlog", "📋 Xem việc cần triển khai ngay"),
-            tele_types.BotCommand("remind_now", "🔔 Quét & gửi nhắc việc tồn đọng ngay"),
-            tele_types.BotCommand("remind_status", "⚙️ Trạng thái hệ thống nhắc việc"),
+            tele_types.BotCommand("backlog", "📂 Xem kho lưu trữ giải pháp & công nghệ"),
+            tele_types.BotCommand("saved", "🌐 Mở trang web lưu trữ tập trung"),
             tele_types.BotCommand("reset", "🔄 Xóa ngữ cảnh trò chuyện CTO"),
             tele_types.BotCommand("help", "📖 Hướng dẫn sử dụng & tính năng"),
         ])
@@ -1491,8 +1490,8 @@ def setup_bot():
 
     def create_main_reply_keyboard():
         markup = tele_types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        btn1 = tele_types.KeyboardButton("📋 Việc Cần Làm")
-        btn2 = tele_types.KeyboardButton("🔔 Nhắc Việc Ngay")
+        btn1 = tele_types.KeyboardButton("📂 Kho Lưu Trữ")
+        btn2 = tele_types.KeyboardButton("🌐 Mở Web / Sheet")
         btn3 = tele_types.KeyboardButton("🎛️ Menu Lệnh")
         btn4 = tele_types.KeyboardButton("⚙️ Trạng Thái")
         markup.add(btn1, btn2)
@@ -1501,12 +1500,12 @@ def setup_bot():
 
     def create_menu_dashboard_markup():
         markup = tele_types.InlineKeyboardMarkup(row_width=2)
-        btn_bl = tele_types.InlineKeyboardButton("📋 Xem Backlog", callback_data="menu_backlog")
-        btn_rm = tele_types.InlineKeyboardButton("🔔 Quét Nhắc Việc", callback_data="menu_remind")
+        btn_bl = tele_types.InlineKeyboardButton("📂 Xem Kho Lưu Trữ", callback_data="menu_backlog")
+        btn_wb = tele_types.InlineKeyboardButton("🌐 Mở Web / Sheet", url="https://vibecheck-ai-bot.onrender.com/saved")
         btn_st = tele_types.InlineKeyboardButton("⚙️ Trạng Thái", callback_data="menu_status")
         btn_rs = tele_types.InlineKeyboardButton("🔄 Xóa Chat", callback_data="menu_reset")
         btn_hp = tele_types.InlineKeyboardButton("📖 Hướng Dẫn Sử Dụng", callback_data="menu_help")
-        markup.add(btn_bl, btn_rm)
+        markup.add(btn_bl, btn_wb)
         markup.add(btn_st, btn_rs)
         markup.add(btn_hp)
         return markup
@@ -1526,11 +1525,11 @@ def setup_bot():
             markup.add(btn_rep)
             markup.add(btn_both, btn_dsm)
         elif verdict == "TRIỂN KHAI NGAY":
-            btn_save = tele_types.InlineKeyboardButton("💾 Lưu & Triển Khai Ngay", callback_data=f"save_{audit_id}")
+            btn_save = tele_types.InlineKeyboardButton("💾 Lưu Vào Kho Tập Trung", callback_data=f"save_{audit_id}")
             btn_dsm = tele_types.InlineKeyboardButton("❌ Bỏ qua không lưu", callback_data=f"dsm_{audit_id}")
             markup.add(btn_save, btn_dsm)
         else:
-            btn_save = tele_types.InlineKeyboardButton("📌 Lưu Vào Máy", callback_data=f"save_{audit_id}")
+            btn_save = tele_types.InlineKeyboardButton("📌 Lưu Vào Kho Tập Trung", callback_data=f"save_{audit_id}")
             btn_dsm = tele_types.InlineKeyboardButton("❌ Không lưu", callback_data=f"dsm_{audit_id}")
             markup.add(btn_save, btn_dsm)
 
@@ -1766,8 +1765,23 @@ def setup_bot():
 
         # SMART INTENT INTERCEPTOR (Xử lý tức thì các phím bấm nhanh từ Bàn phím nổi - 0ms LLM Latency, 0đ quota)
         clean_lower = text.lower().strip()
-        if clean_lower in ["📋 việc cần làm", "📋 việc cần làm (/backlog)", "/backlog", "backlog", "todo", "/todo"]:
+        if clean_lower in ["📂 kho lưu trữ", "kho lưu trữ", "📋 việc cần làm", "📋 việc cần làm (/backlog)", "/backlog", "backlog", "todo", "/todo", "/saved", "saved"]:
             handle_backlog_cmd(message)
+            return
+
+        if clean_lower in ["🌐 mở web / sheet", "mở web", "mở sheet", "sheet", "web"]:
+            send_long_message(
+                bot, chat_id,
+                "🌐 <b>KHO LƯU TRỮ CÔNG NGHỆ TẬP TRUNG:</b>\n\n"
+                "• <b>Mở trên trình duyệt điện thoại / máy tính</b>:\n"
+                "👉 https://vibecheck-ai-bot.onrender.com/saved\n\n"
+                "• <b>Đồng bộ tự động vào Google Sheets</b>:\n"
+                "Tại ô <code>A1</code> trong Google Sheet, nhập công thức:\n"
+                "<code>=IMPORTHTML(\"https://vibecheck-ai-bot.onrender.com/saved\", \"table\", 1)</code>\n\n"
+                "• <b>Tải file CSV</b>:\n"
+                "👉 https://vibecheck-ai-bot.onrender.com/saved.csv\n\n"
+                "<i>(Hệ thống lưu trữ độc lập, không nhắc việc, không spam Telegram)</i>"
+            )
             return
 
         if clean_lower in ["🔔 nhắc việc ngay", "🔔 nhắc việc ngay (/remind_now)", "/remind_now", "remind_now", "check_overdue", "/check_overdue"]:
@@ -1791,9 +1805,9 @@ def setup_bot():
             return
 
         # TẮT / BẬT NHẮC NHỞ BẰNG TIẾNG VIỆT TỰ NHIÊN
-        if any(p in clean_lower for p in ["tắt nhắc nhở", "tat nhac nho", "đừng nhắc nữa", "dung nhac nua", "tắt thông báo", "tat thong bao", "dừng nhắc nhở"]):
-            state_mgr.set_enabled(False)
-            send_long_message(bot, chat_id, "🔕 **ĐÃ TẮT TÍNH NĂNG NHẮC VIỆC TỰ ĐỘNG!**\nBot sẽ KHÔNG BAO GIỜ tự động gửi tin nhắn làm phiền anh nữa. Khi nào muốn xem danh sách việc tồn đọng, anh chỉ cần gõ `/backlog`.")
+        if any(p in clean_lower for p in ["tắt nhắc nhở", "tat nhac nho", "đừng nhắc nữa", "dung nhac nua", "tắt thông báo", "tat thong bao", "dừng nhắc nhở", "không nhắc nữa"]):
+            send_long_message(bot, chat_id, "🔕 **TÍNH NĂNG NHẮC VIỆC ĐÃ ĐƯỢC GỠ BỎ HOÀN TOÀN!**\nBot CTO sẽ không bao giờ tự động gửi tin nhắc nhở làm phiền anh nữa. Toàn bộ nội dung lưu trữ được xem tập trung tại https://vibecheck-ai-bot.onrender.com/saved hoặc gõ `/backlog`.")
+            return
             return
 
         if any(p in clean_lower for p in ["bật nhắc nhở", "bat nhac nho", "mở nhắc nhở"]):
@@ -2093,8 +2107,8 @@ def setup_bot():
                 traceback.print_exc()
                 safe_edit_message(bot, chat_id, status_msg_id, "⚠️ Máy chủ AI đang tạm thời quá tải trong giây lát. Bạn vui lòng bấm gửi lại sau 5 giây nhé!")
 
-    # 4. Quản trị Master Action Backlog (/backlog hoặc /todo)
-    @bot.message_handler(commands=['backlog', 'todo'])
+    # 4. Quản trị Kho lưu trữ tập trung (/backlog hoặc /todo hoặc /saved)
+    @bot.message_handler(commands=['backlog', 'todo', 'saved'])
     def handle_backlog_cmd(message):
         if idempotency_mgr.is_duplicate_and_record(f"backlog_{message.message_id}_{message.chat.id}"):
             return
@@ -2103,35 +2117,38 @@ def setup_bot():
         chat_id = message.chat.id
         bot.send_chat_action(chat_id, 'typing')
         if not os.path.exists(BACKLOG_FILE):
-            send_long_message(bot, chat_id, "📋 Chưa có file `00_ACTION_BACKLOG.md` trên hệ thống.")
+            send_long_message(bot, chat_id, "📂 Chưa có nội dung lưu trữ nào trên hệ thống.")
             return
 
         try:
             records, _ = BacklogParser.parse_file(BACKLOG_FILE)
-            pending = [r for r in records if r.is_pending]
-            if not pending:
-                send_long_message(bot, chat_id, "🎉 **TUYỆT VỜI!**\nHiện không còn việc tồn đọng nào cần triển khai ngay trong `00_ACTION_BACKLOG.md`.")
+            if not records:
+                send_long_message(bot, chat_id, "📂 Hiện chưa có giải pháp hoặc công nghệ nào được lưu trong kho lưu trữ.")
                 return
 
-            msg = f"📋 **MASTER ACTION BACKLOG — VIỆC CẦN TRIỂN KHAI NGAY ({len(pending)} việc):**\n\n"
+            msg = f"📂 <b>KHO LƯU TRỮ CÔNG NGHỆ & GIẢI PHÁP TẬP TRUNG ({len(records)} mục):</b>\n\n"
+            msg += "🌐 <b>Xem trực tuyến (Web / Google Sheets)</b>:\n👉 https://vibecheck-ai-bot.onrender.com/saved\n\n"
+
             markup = tele_types.InlineKeyboardMarkup(row_width=2)
-            for idx, r in enumerate(pending[:6], 1):
+            btn_web = tele_types.InlineKeyboardButton("🌐 Mở Kho Lưu Trữ (Web / Sheet)", url="https://vibecheck-ai-bot.onrender.com/saved")
+            markup.add(btn_web)
+
+            for idx, r in enumerate(records[:6], 1):
                 msg += (
-                    f"**{idx}. {r.tool_name}** (`{r.task_id}`)\n"
-                    f"• *Trụ cột*: {r.pillar}\n"
-                    f"• *Hành động*: {r.action_item}\n"
-                    f"• *Ưu tiên*: {r.priority} | *Thời gian*: {r.date_str}\n\n"
+                    f"<b>{idx}. {r.tool_name}</b> (<code>{r.task_id}</code>)\n"
+                    f"• <i>Trụ cột</i>: {r.pillar}\n"
+                    f"• <i>Nội dung</i>: {r.action_item}\n"
+                    f"• <i>Trạng thái</i>: {r.status} | <i>Thời gian</i>: {r.date_str}\n\n"
                 )
                 btn_prompt = tele_types.InlineKeyboardButton(f"⚡ Prompt #{idx}", callback_data=f"agp_{r.task_id}")
-                btn_done = tele_types.InlineKeyboardButton(f"✅ Xong #{idx}", callback_data=f"done_{r.task_id}")
-                markup.add(btn_prompt, btn_done)
+                markup.add(btn_prompt)
 
-            msg += "> 💡 *Mẹo*: Bấm nút [⚡ Prompt] để lấy ngay prompt dán vào Antigravity IDE, hoặc bấm [✅ Xong] sau khi làm xong."
+            msg += "💡 <i>Bot không tự động nhắc lại các mục này. Sếp có thể tự mở kho lưu trữ bất kỳ lúc nào để xem lại hoặc đưa cho AI khác kiểm tra khi cần triển khai.</i>"
             send_long_message(bot, chat_id, msg, reply_markup=markup)
         except Exception as e:
-            send_long_message(bot, chat_id, f"⚠️ Lỗi đọc Backlog: {e}")
+            send_long_message(bot, chat_id, f"⚠️ Lỗi đọc kho lưu trữ: {e}")
 
-    # 5. Quản trị Chế độ nhắc việc tự động (/remind_now hoặc /remind_status)
+    # 5. Thông báo gỡ bỏ nhắc việc tự động (/remind_now hoặc /remind_status)
     @bot.message_handler(commands=['remind_now', 'check_overdue'])
     def handle_remind_now(message):
         if idempotency_mgr.is_duplicate_and_record(f"rnow_{message.message_id}_{message.chat.id}"):
@@ -2140,21 +2157,14 @@ def setup_bot():
             return
         chat_id = message.chat.id
         bot.send_chat_action(chat_id, 'typing')
-        try:
-            alerted = dispatch_overdue_alerts(
-                bot=bot,
-                backlog_path=BACKLOG_FILE,
-                base_dir=BASE_DIR,
-                threshold_hours=12.0,
-                force=True,
-                target_chat_id=chat_id
-            )
-            if not alerted:
-                send_long_message(bot, chat_id, "✅ **TẤT CẢ ĐỀU ỔN!**\nKhông có task [TRIỂN KHAI NGAY] nào bị trễ hạn quá 12 giờ trong `00_ACTION_BACKLOG.md`.")
-            else:
-                send_long_message(bot, chat_id, f"🔔 **ĐÃ HOÀN TẤT QUÉT NHẮC VIỆC!**\nĐã gửi thông báo nhắc nhở cho {len(alerted)} task tồn đọng quá 12 giờ.")
-        except Exception as e:
-            send_long_message(bot, chat_id, f"⚠️ Lỗi quét nhắc việc: {e}")
+        msg = (
+            "🔕 <b>TÍNH NĂNG NHẮC VIỆC ĐÃ ĐƯỢC TẮT HOÀN TOÀN</b>\n\n"
+            "Theo đúng chỉ đạo của Founder, Bot CTO không còn cơ chế gửi thông báo nhắc việc tồn đọng hay làm phiền trên Telegram.\n\n"
+            "📂 <b>Kho lưu trữ tập trung để xem lại khi cần:</b>\n"
+            "👉 https://vibecheck-ai-bot.onrender.com/saved\n"
+            "<i>(Hoặc gõ /backlog để xem danh sách tóm tắt)</i>"
+        )
+        send_long_message(bot, chat_id, msg)
 
     @bot.message_handler(commands=['remind_status'])
     def handle_remind_status(message):
@@ -2165,33 +2175,21 @@ def setup_bot():
         chat_id = message.chat.id
         bot.send_chat_action(chat_id, 'typing')
         try:
-            saved_admin = AdminChatIDManager.get_chat_id(BASE_DIR)
             records, _ = BacklogParser.parse_file(BACKLOG_FILE)
-            pending = [r for r in records if r.is_pending]
-            overdue = [r for r in records if r.is_overdue(threshold_hours=12.0)]
+            count = len(records)
+        except Exception:
+            count = 0
 
-            status_text = (
-                "⚙️ <b>TRẠNG THÁI HỆ THỐNG NHẮC VIỆC TỰ ĐỘNG (VIBECHECK ESCALATION):</b>\n\n"
-                f"• <b>Admin Chat ID</b>: <code>{saved_admin}</code>\n"
-                f"• <b>Ngưỡng trễ hạn (Overdue Threshold)</b>: 12 giờ\n"
-                f"• <b>Chu kỳ quét ngầm (Background Interval)</b>: 30 phút / lần\n"
-                f"• <b>Giãn cách nhắc lại (Cooldown)</b>: 12 giờ / task (Chống spam)\n"
-                f"• <b>Tổng task đang chờ làm</b>: {len(pending)}\n"
-                f"• <b>Số task đã trễ hạn (>12h)</b>: {len(overdue)}\n\n"
-            )
-            if overdue:
-                status_text += "<b>Danh sách task quá hạn:</b>\n"
-                for o in overdue:
-                    info = state_mgr.get_info(o.task_id)
-                    snooze_str = f" <i>(Đang hoãn còn {info['snooze_remaining_hours']:.1f}h)</i>" if info['is_snoozed'] else ""
-                    status_text += f"• 🔴 <code>{o.task_id}</code>: {o.tool_name}{snooze_str}\n"
-            else:
-                status_text += "🟢 Không có task nào bị trễ hạn.\n"
-
-            status_text += "\n💡 <i>Gõ /remind_now để kích hoạt quét và nhận thông báo nhắc việc ngay lập tức.</i>"
-            send_long_message(bot, chat_id, status_text)
-        except Exception as e:
-            send_long_message(bot, chat_id, f"⚠️ Lỗi kiểm tra trạng thái: {e}")
+        status_text = (
+            "⚙️ <b>TRẠNG THÁI LƯU TRỮ & NHẮC VIỆC:</b>\n\n"
+            "• <b>Cơ chế nhắc việc tự động</b>: ❌ ĐÃ GỠ BỎ HOÀN TOÀN (Zero Telegram spam)\n"
+            "• <b>Kho lưu trữ tập trung</b>: 🟢 ĐANG HOẠT ĐỘNG (Durable & Web-accessible)\n"
+            f"• <b>Tổng số mục đã lưu</b>: {count} mục\n"
+            "• <b>Trang web xem tập trung</b>: https://vibecheck-ai-bot.onrender.com/saved\n"
+            "• <b>Tích hợp Google Sheets</b>: <code>=IMPORTHTML(\"https://vibecheck-ai-bot.onrender.com/saved\", \"table\", 1)</code>\n\n"
+            "💡 <i>Founder tự mở xem khi cần, không có áp lực deadline hay nghĩa vụ phải làm.</i>"
+        )
+        send_long_message(bot, chat_id, status_text)
 
     # Lệnh đình chỉ/hủy bỏ task nhanh (/cancel <task_id> hoặc /huy)
     @bot.message_handler(commands=['cancel', 'huy', 'dinhchi'])
@@ -2208,30 +2206,17 @@ def setup_bot():
         target_id = parts[1].strip()
         success = backlog_mgr.cancel_task(target_id)
         if success:
-            send_long_message(bot, chat_id, f"🚫 **ĐÃ ĐÌNH CHỈ THÀNH CÔNG TASK `{target_id}`!**\nTask đã được chuyển sang trạng thái `[-] Đã đình chỉ` trong `00_ACTION_BACKLOG.md` và hệ thống sẽ KHÔNG BAO GIỜ nhắc nhở task này nữa.")
+            send_long_message(bot, chat_id, f"🚫 **ĐÃ ĐÌNH CHỈ THÀNH CÔNG TASK `{target_id}`!**\nTask đã được chuyển sang trạng thái `[-] Đã đình chỉ` trong `00_ACTION_BACKLOG.md`.")
         else:
             send_long_message(bot, chat_id, f"⚠️ Không tìm thấy hoặc task `{target_id}` đã hoàn thành/hủy trước đó.")
 
-    # Lệnh bật/tắt hoặc kiểm tra nhắc nhở (/remind [on|off])
+    # Lệnh kiểm tra nhắc nhở (/remind [on|off])
     @bot.message_handler(commands=['remind', 'nhacnho'])
     def handle_remind_cmd(message):
         if idempotency_mgr.is_duplicate_and_record(f"remind_{message.message_id}_{message.chat.id}"):
             return
         if not check_authorization(bot, message):
             return
-        chat_id = message.chat.id
-        parts = message.text.strip().split()
-        if len(parts) > 1:
-            sub = parts[1].lower()
-            if sub in ["off", "tat", "tắt", "stop", "disable"]:
-                state_mgr.set_enabled(False)
-                send_long_message(bot, chat_id, "🔕 **ĐÃ TẮT TÍNH NĂNG NHẮC VIỆC TỰ ĐỘNG!**\nBot sẽ KHÔNG BAO GIỜ tự động gửi tin nhắn làm phiền anh nữa. Khi nào muốn xem danh sách việc tồn đọng, anh chỉ cần gõ `/backlog`.")
-                return
-            elif sub in ["on", "bat", "bật", "start", "enable"]:
-                state_mgr.set_enabled(True)
-                send_long_message(bot, chat_id, "🔔 **ĐÃ BẬT LẠI TÍNH NĂNG NHẮC VIỆC TỰ ĐỘNG.**\nBot sẽ gửi nhắc nhở 1 lần/ngày cho các việc quá hạn >12h.")
-                return
-
         handle_remind_now(message)
 
     # 6. Bảng điều khiển tác vụ nhanh (/menu)
@@ -2345,10 +2330,8 @@ def setup_bot():
 
             # Xử lý tạm hoãn nhắc nhở: snz_{task_id}
             if action == "snz":
-                task_id = audit_id
-                state_mgr.snooze_task(task_id, hours=24.0)
-                bot.answer_callback_query(call.id, f"⏸️ Đã tạm hoãn nhắc nhở task {task_id} trong 24 giờ!", show_alert=True)
-                send_long_message(bot, call.message.chat.id, f"⏸️ **ĐÃ TẠM HOÃN NHẮC NHỞ TASK `{task_id}` TRONG 24 GIỜ.**\nTask vẫn giữ nguyên trạng thái `[ ] Chờ làm` trong Backlog.")
+                bot.answer_callback_query(call.id, "Hệ thống nhắc việc đã được tắt vĩnh viễn.", show_alert=True)
+                send_long_message(bot, call.message.chat.id, "ℹ️ Hệ thống nhắc việc tự động đã được gỡ bỏ hoàn toàn theo yêu cầu của Founder.")
                 return
 
             # Xử lý lấy Prompt Antigravity từ Backlog: agp_{task_id}
@@ -2399,20 +2382,23 @@ def setup_bot():
                         new_task_id = backlog_mgr.add_task(rec_data)
                         cached["task_id"] = new_task_id
                         msg = (
-                            f"💾 <b>ĐÃ LƯU BÁO CÁO VÀO MÁY TÍNH & MASTER BACKLOG!</b>\n\n"
-                            f"• <b>File báo cáo</b>: <code>{file_name}</code> (trong <code>Khao_Sat_Cong_Nghe/</code>)\n"
-                            f"• <b>Mã Task</b>: <code>{new_task_id}</code>\n"
-                            f"• <b>Trạng thái</b>: <code>[ ] Chờ làm</code> trong <code>00_ACTION_BACKLOG.md</code>\n\n"
-                            f"👉 <i>Gõ /backlog để theo dõi danh sách việc cần làm ngay mỗi ngày!</i>"
+                            f"💾 <b>ĐÃ LƯU VÀO KHO LƯU TRỮ TẬP TRUNG!</b>\n\n"
+                            f"• <b>Mã lưu trữ</b>: <code>{new_task_id}</code>\n"
+                            f"• <b>Công nghệ</b>: <b>{cached.get('name', 'Công cụ mới')}</b>\n"
+                            f"• <b>File chi tiết</b>: <code>{file_name}</code>\n\n"
+                            f"🌐 <b>Xem trực tuyến (Web / Google Sheets)</b>:\n"
+                            f"👉 https://vibecheck-ai-bot.onrender.com/saved\n\n"
+                            f"<i>(Hệ thống KHÔNG tự động nhắc lại nội dung này. Khi cần cân nhắc triển khai, bạn có thể tự mở kho lưu trữ hoặc sao chép để hỏi lại ChatGPT/Claude/Gemini)</i>"
                         )
                         send_long_message(bot, call.message.chat.id, msg)
                     except Exception as e:
-                        send_long_message(bot, call.message.chat.id, f"⚠️ Đã lưu file nhưng lỗi ghi Backlog: {e}")
+                        send_long_message(bot, call.message.chat.id, f"⚠️ Đã lưu file nhưng lỗi ghi kho lưu trữ: {e}")
                 else:
                     msg = (
-                        f"📌 <b>ĐÃ LƯU BÁO CÁO THAM KHẢO VÀO MÁY TÍNH!</b>\n\n"
+                        f"📌 <b>ĐÃ LƯU VÀO KHO LƯU TRỮ TẬP TRUNG!</b>\n\n"
                         f"• <b>File</b>: <code>{file_name}</code> (trong <code>Khao_Sat_Cong_Nghe/</code>)\n"
-                        f"• <b>Phân loại</b>: <b>[{cached.get('verdict', 'LƯU THAM KHẢO')}]</b> (Chưa đưa vào Backlog hành động)."
+                        f"• <b>Phân loại</b>: <b>[{cached.get('verdict', 'LƯU THAM KHẢO')}]</b>\n\n"
+                        f"🌐 <b>Xem trực tuyến</b>: https://vibecheck-ai-bot.onrender.com/saved"
                     )
                     send_long_message(bot, call.message.chat.id, msg)
                 return
@@ -2458,11 +2444,12 @@ def setup_bot():
                     bot.answer_callback_query(call.id, f"🔄 Đã thay thế {old_task_id} bằng {new_task_id}!", show_alert=True)
 
                     msg = (
-                        f"🔄 <b>ĐÃ THAY THẾ CÔNG NGHỆ THÀNH CÔNG TRONG MASTER BACKLOG!</b>\n\n"
-                        f"• <b>Task cũ</b>: <code>{old_task_id}</code> ➔ Chuyển trạng thái <code>[~] Thay thế bởi {new_task_id}</code>\n"
-                        f"• <b>Task mới</b>: <code>{new_task_id}</code> (<b>{cached['name']}</b>) ➔ <code>[ ] Chờ làm</code>\n"
+                        f"🔄 <b>ĐÃ THAY THẾ CÔNG NGHỆ TRONG KHO LƯU TRỮ!</b>\n\n"
+                        f"• <b>Mục cũ</b>: <code>{old_task_id}</code> ➔ <code>[~] Thay thế bởi {new_task_id}</code>\n"
+                        f"• <b>Mục mới</b>: <code>{new_task_id}</code> (<b>{cached['name']}</b>)\n"
                         f"• <b>File báo cáo mới</b>: <code>{file_name}</code>\n\n"
-                        f"👉 <i>Gõ /backlog để kiểm tra danh sách nhiệm vụ cập nhật mới nhất!</i>"
+                        f"🌐 <b>Xem trực tuyến (Web / Google Sheets)</b>:\n"
+                        f"👉 https://vibecheck-ai-bot.onrender.com/saved"
                     )
                     send_long_message(bot, call.message.chat.id, msg)
                 except Exception as e:
@@ -2595,16 +2582,8 @@ def main():
             print(f"⚠️ [HEALTH CHECK] Khởi động HTTP check: {e}", flush=True)
 
     # Khởi tạo BotProxy để EscalationWorker luôn trỏ đến bot instance đang hoạt động
-    bot_proxy = BotProxy()
-    start_proactive_escalation_worker(
-        bot=bot_proxy,
-        backlog_path=BACKLOG_FILE,
-        base_dir=BASE_DIR,
-        check_interval_seconds=1800,
-        threshold_hours=12.0,
-        initial_delay_seconds=10
-    )
-    print("✅ PROACTIVE ESCALATION DAEMON: Đã kích hoạt luồng quét ngầm nhắc việc quá hạn (12h threshold / 30min cycle)", flush=True)
+    # Proactive Escalation Worker permanently removed per Founder directive
+    print("ℹ️ PROACTIVE ESCALATION DAEMON: Đã tắt hoàn toàn theo yêu cầu của Founder (Không nhắc nhở Telegram)", flush=True)
 
     # ==============================================================================
     # VÒNG LẶP GIÁM SÁT BẤT TỬ (IMMORTAL SUPERVISOR POLLING LOOP)

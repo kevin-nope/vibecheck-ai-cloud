@@ -122,6 +122,55 @@ class UnifiedServerHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'{"status": "ready"}')
             return
 
+        elif path in ("/saved", "/backlog"):
+            import bot_auditor
+            from escalation_system import export_backlog_to_html
+            html_content = export_backlog_to_html(bot_auditor.BACKLOG_FILE)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html_content.encode("utf-8"))
+            return
+
+        elif path in ("/saved.csv", "/backlog.csv"):
+            import bot_auditor
+            from escalation_system import export_backlog_to_csv
+            csv_content = export_backlog_to_csv(bot_auditor.BACKLOG_FILE)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="vibecheck_saved.csv"')
+            self.end_headers()
+            self.wfile.write(csv_content.encode("utf-8"))
+            return
+
+        elif path in ("/saved.json", "/backlog.json"):
+            import bot_auditor
+            from escalation_system import BacklogParser
+            records = []
+            if os.path.exists(bot_auditor.BACKLOG_FILE):
+                try:
+                    recs, _ = BacklogParser.parse_file(bot_auditor.BACKLOG_FILE)
+                    records = [
+                        {
+                            "task_id": r.task_id,
+                            "date": r.date_str,
+                            "tool_name": r.tool_name,
+                            "pillar": r.pillar,
+                            "action_item": r.action_item,
+                            "priority": r.priority,
+                            "status": r.status,
+                            "file_link": r.report_link
+                        }
+                        for r in recs
+                    ]
+                except Exception as e:
+                    logger.error(f"JSON export error: {e}")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(records, ensure_ascii=False, indent=2).encode("utf-8"))
+            return
+
         elif path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -261,17 +310,8 @@ def main():
         HEALTH_STATE["bot1_ready"] = True
         logger.info("✅ Bot 1 (Maker / CTO) setup completed.")
 
-        # Start Proactive Escalation Worker
-        from escalation_system import start_proactive_escalation_worker
-        start_proactive_escalation_worker(
-            bot=bot1_instance,
-            backlog_path=bot_auditor.BACKLOG_FILE,
-            base_dir=bot_auditor.BASE_DIR,
-            check_interval_seconds=1800,
-            threshold_hours=12.0,
-            initial_delay_seconds=10
-        )
-        logger.info("✅ Proactive Escalation Worker started for Bot 1.")
+        # Proactive Escalation Worker permanently removed per Founder directive (no Telegram reminder spam)
+        logger.info("ℹ️ Proactive Escalation Worker is disabled per Founder directive.")
     except Exception as e:
         logger.error(f"❌ Failed to setup Bot 1: {e}")
         HEALTH_STATE["last_error"] = f"Bot 1 Setup Error: {e}"

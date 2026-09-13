@@ -356,6 +356,13 @@ class BacklogManager:
                 try:
                     os.replace(temp_path, self.backlog_path)
                     DurablePersistenceAdapter.sync_backlog(self.backlog_path)
+                    try:
+                        csv_path = os.path.join(os.path.dirname(self.backlog_path) or ".", "00_SAVED_ARCHIVE.csv")
+                        csv_content = export_backlog_to_csv(self.backlog_path)
+                        with open(csv_path, "w", encoding="utf-8") as f_csv:
+                            f_csv.write(csv_content)
+                    except Exception as ce:
+                        logger.warning(f"Could not auto-generate CSV archive: {ce}")
                     return True
                 except PermissionError:
                     if replace_attempt < 4:
@@ -363,6 +370,13 @@ class BacklogManager:
                     else:
                         raise
             DurablePersistenceAdapter.sync_backlog(self.backlog_path)
+            try:
+                csv_path = os.path.join(os.path.dirname(self.backlog_path) or ".", "00_SAVED_ARCHIVE.csv")
+                csv_content = export_backlog_to_csv(self.backlog_path)
+                with open(csv_path, "w", encoding="utf-8") as f_csv:
+                    f_csv.write(csv_content)
+            except Exception as ce:
+                logger.warning(f"Could not auto-generate CSV archive: {ce}")
             return True
         except Exception as e:
             logger.error(f"Atomic replace failed in BacklogManager: {e}")
@@ -746,32 +760,16 @@ class RemindedStateManager:
             logger.error(f"Failed to save reminded state: {e}")
 
     def is_enabled(self) -> bool:
-        with self._lock:
-            return self._state.get("reminders_enabled", True)
+        # PERMANENTLY DISABLED per Founder directive.
+        return False
 
     def set_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            self._state["reminders_enabled"] = enabled
-            self._save()
+        # No-op: reminders are permanently disabled.
+        pass
 
     def should_remind(self, task_id: str, cooldown_hours: float = 24.0, now_ts: Optional[float] = None) -> bool:
-        with self._lock:
-            if not self._state.get("reminders_enabled", True):
-                return False
-
-            current_ts = now_ts if now_ts is not None else time.time()
-            
-            # Check snooze
-            snooze_until = self._state["snoozed_until"].get(task_id, 0)
-            if current_ts < snooze_until:
-                return False
-
-            # Check cooldown (mặc định 24 giờ chống spam)
-            last_ts = self._state["last_reminded"].get(task_id, 0)
-            if (current_ts - last_ts) < (cooldown_hours * 3600):
-                return False
-
-            return True
+        # PERMANENTLY DISABLED: Bot CTO will NEVER remind or spam Telegram.
+        return False
 
     def record_reminded(self, task_id: str, now_ts: Optional[float] = None) -> None:
         with self._lock:
@@ -826,99 +824,247 @@ def build_overdue_reminder_card(task: BacklogRecord) -> Tuple[str, List[Dict[str
 
 
 def dispatch_overdue_alerts(
-    bot,
-    backlog_path: str,
-    base_dir: str,
+    bot=None,
+    backlog_path: str = "",
+    base_dir: str = "",
     threshold_hours: float = 12.0,
     force: bool = False,
     target_chat_id: Optional[int] = None,
     now: Optional[datetime] = None
 ) -> List[str]:
     """
-    Scans for overdue pending tasks and dispatches reminder cards.
-    Returns list of task_ids that were alerted.
+    PERMANENTLY DEACTIVATED per Founder directive.
+    Bot CTO will NEVER automatically send overdue reminders or push notifications.
+    Returns empty list.
     """
-    chat_id = target_chat_id if target_chat_id else AdminChatIDManager.get_chat_id(base_dir)
-    if not chat_id:
-        logger.warning("dispatch_overdue_alerts: No admin chat_id found. Cannot dispatch reminders.")
-        return []
-
-    backlog_mgr = BacklogManager(backlog_path)
-    state_mgr = RemindedStateManager(base_dir)
-
-    if not force and not state_mgr.is_enabled():
-        logger.info("dispatch_overdue_alerts: Nhắc nhở tự động đang TẮT theo yêu cầu của Founder.")
-        return []
-
-    overdue_tasks = backlog_mgr.get_overdue_tasks(threshold_hours=threshold_hours, now=now)
-
-    alerted_ids = []
-    MAX_ALERTS_PER_CYCLE = 1 if not force else 5
-    for task in overdue_tasks:
-        if len(alerted_ids) >= MAX_ALERTS_PER_CYCLE:
-            break
-
-        if force or state_mgr.should_remind(task.task_id, cooldown_hours=24.0):
-            card_text, buttons = build_overdue_reminder_card(task)
-            
-            try:
-                # If bot is telebot instance
-                from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-                markup = InlineKeyboardMarkup()
-                markup.add(
-                    InlineKeyboardButton(buttons[0]["text"], callback_data=buttons[0]["callback_data"]),
-                    InlineKeyboardButton(buttons[1]["text"], callback_data=buttons[1]["callback_data"])
-                )
-                markup.add(
-                    InlineKeyboardButton(buttons[2]["text"], callback_data=buttons[2]["callback_data"]),
-                    InlineKeyboardButton(buttons[3]["text"], callback_data=buttons[3]["callback_data"])
-                )
-                bot.send_message(chat_id, card_text, parse_mode="HTML", reply_markup=markup)
-            except Exception as e:
-                # Fallback for mock or basic bot
-                try:
-                    bot.send_message(chat_id, card_text)
-                except Exception as inner_e:
-                    logger.error(f"Failed to send overdue alert for {task.task_id}: {inner_e}")
-                    continue
-
-            state_mgr.record_reminded(task.task_id)
-            alerted_ids.append(task.task_id)
-
-    return alerted_ids
+    logger.info("dispatch_overdue_alerts: Overdue reminders are permanently disabled per Founder directive.")
+    return []
 
 
 def start_proactive_escalation_worker(
-    bot,
-    backlog_path: str,
-    base_dir: str,
+    bot=None,
+    backlog_path: str = "",
+    base_dir: str = "",
     check_interval_seconds: int = 1800,
     threshold_hours: float = 12.0,
     initial_delay_seconds: int = 300
-) -> threading.Thread:
+) -> Optional[threading.Thread]:
     """
-    Launches a dedicated background daemon thread that runs periodic overdue scans.
+    PERMANENTLY DEACTIVATED per Founder directive.
+    Proactive escalation background thread is disabled to eliminate Telegram spam.
     """
-    def worker_loop():
-        logger.info(f"EscalationWorker started (Interval: {check_interval_seconds}s, Threshold: {threshold_hours}h).")
-        time.sleep(initial_delay_seconds)
-        while True:
-            try:
-                alerted = dispatch_overdue_alerts(
-                    bot=bot,
-                    backlog_path=backlog_path,
-                    base_dir=base_dir,
-                    threshold_hours=threshold_hours,
-                    force=False
-                )
-                if alerted:
-                    logger.info(f"EscalationWorker: Dispatched overdue alerts for: {alerted}")
-            except Exception as e:
-                logger.error(f"EscalationWorker error: {e}")
+    logger.info("start_proactive_escalation_worker: Background escalation thread is permanently disabled per Founder directive.")
+    return None
 
-            time.sleep(check_interval_seconds)
 
-    thread = threading.Thread(target=worker_loop, daemon=True, name="EscalationWorkerThread")
-    thread.start()
-    return thread
+# ==============================================================================
+# 9. CENTRALIZED REPOSITORY EXPORTERS (GOOGLE SHEETS / CSV / HTML VIEWER)
+# ==============================================================================
+
+def export_backlog_to_csv(backlog_path: str) -> str:
+    """
+    Exports backlog items to CSV formatted string with UTF-8 BOM for seamless Google Sheets / Excel import.
+    """
+    import io
+    import csv
+    if not os.path.exists(backlog_path):
+        return "\ufeffMã Lưu Trữ,Ngày Lưu,Công Nghệ / Tool,Trụ Cột Áp Dụng,Nội Dung Đề Xuất,Độ Ưu Tiên,Trạng Thái,File Báo Cáo\n"
+
+    records, _ = BacklogParser.parse_file(backlog_path)
+    output = io.StringIO()
+    output.write("\ufeff")  # UTF-8 BOM
+    writer = csv.writer(output)
+    writer.writerow(["Mã Lưu Trữ", "Ngày Lưu", "Công Nghệ / Tool", "Trụ Cột Áp Dụng", "Nội Dung Đề Xuất", "Độ Ưu Tiên", "Trạng Thái", "File Báo Cáo"])
+    for r in records:
+        writer.writerow([r.task_id, r.date_str, r.tool_name, r.pillar, r.action_item, r.priority, r.status, r.report_link])
+    return output.getvalue()
+
+
+def export_backlog_to_html(backlog_path: str) -> str:
+    """
+    Exports backlog items to a clean, responsive HTML page with modern styling.
+    Compatible with Google Sheets =IMPORTHTML(url, "table", 1).
+    """
+    import html
+    records = []
+    if os.path.exists(backlog_path):
+        try:
+            records, _ = BacklogParser.parse_file(backlog_path)
+        except Exception as e:
+            logger.error(f"Error parsing backlog for HTML export: {e}")
+
+    rows_html = []
+    for r in records:
+        status_badge = ""
+        st_lower = r.status.lower()
+        if "hoàn thành" in st_lower or "[x]" in st_lower:
+            status_badge = '<span style="color:#10b981;font-weight:600;">✓ Hoàn thành</span>'
+        elif "đình chỉ" in st_lower or "[-]" in st_lower:
+            status_badge = '<span style="color:#ef4444;font-weight:600;">✗ Đã đình chỉ</span>'
+        elif "thay thế" in st_lower or "[~]" in st_lower:
+            status_badge = '<span style="color:#6b7280;font-style:italic;">↺ Đã thay thế</span>'
+        else:
+            status_badge = '<span style="color:#3b82f6;font-weight:600;">◉ Đã lưu</span>'
+
+        rows_html.append(f"""
+        <tr>
+            <td style="font-family:monospace;font-weight:bold;">{html.escape(r.task_id)}</td>
+            <td style="white-space:nowrap;color:#64748b;">{html.escape(r.date_str)}</td>
+            <td style="font-weight:600;color:#0f172a;">{html.escape(r.tool_name)}</td>
+            <td style="color:#475569;">{html.escape(r.pillar)}</td>
+            <td style="color:#334155;">{html.escape(r.action_item)}</td>
+            <td style="white-space:nowrap;">{html.escape(r.priority)}</td>
+            <td style="white-space:nowrap;">{status_badge}</td>
+        </tr>
+        """)
+
+    table_rows = "\n".join(rows_html) if rows_html else '<tr><td colspan="7" style="text-align:center;padding:24px;color:#94a3b8;">Chưa có nội dung nào được lưu.</td></tr>'
+
+    return f"""<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VibeCheck AI — Kho Lưu Trữ Công Nghệ & Giải Pháp</title>
+    <style>
+        :root {{
+            --bg: #f8fafc;
+            --surface: #ffffff;
+            --border: #e2e8f0;
+            --text: #1e293b;
+            --primary: #2563eb;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 24px;
+            line-height: 1.5;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+            background: var(--surface);
+            padding: 28px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05);
+            border: 1px solid var(--border);
+        }}
+        h1 {{
+            font-size: 22px;
+            margin-top: 0;
+            margin-bottom: 8px;
+            color: #0f172a;
+        }}
+        .subtitle {{
+            color: #64748b;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }}
+        .info-box {{
+            background: #eff6ff;
+            border-left: 4px solid var(--primary);
+            padding: 14px 16px;
+            border-radius: 6px;
+            font-size: 13.5px;
+            color: #1e40af;
+            margin-bottom: 24px;
+        }}
+        .actions {{
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }}
+        .btn {{
+            display: inline-block;
+            padding: 8px 16px;
+            background: var(--primary);
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 13.5px;
+            font-weight: 500;
+        }}
+        .btn-outline {{
+            background: transparent;
+            color: var(--primary);
+            border: 1px solid var(--primary);
+        }}
+        .table-responsive {{
+            overflow-x: auto;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13.5px;
+            text-align: left;
+        }}
+        th {{
+            background: #f1f5f9;
+            color: #475569;
+            font-weight: 600;
+            padding: 12px;
+            border-bottom: 2px solid var(--border);
+            white-space: nowrap;
+        }}
+        td {{
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }}
+        tr:hover {{
+            background-color: #f8fafc;
+        }}
+        footer {{
+            margin-top: 24px;
+            font-size: 12px;
+            color: #94a3b8;
+            text-align: center;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 VibeCheck AI — Kho Lưu Trữ Công Nghệ & Giải Pháp</h1>
+        <div class="subtitle">Nơi lưu trữ tập trung các nội dung đã được CTO & Red Team thẩm định. Không nhắc nhở, không thúc ép tiến độ.</div>
+
+        <div class="info-box">
+            📊 <b>Tích hợp Google Sheets tự động cập nhật:</b> Mở Google Sheet bất kỳ, tại ô <b>A1</b> dán công thức:
+            <br>
+            <code style="background:#dbeafe;padding:3px 6px;border-radius:4px;display:inline-block;margin-top:6px;font-weight:bold;">=IMPORTHTML("https://vibecheck-ai-bot.onrender.com/saved", "table", 1)</code>
+        </div>
+
+        <div class="actions">
+            <a href="/saved.csv" class="btn" download="vibecheck_saved.csv">📥 Tải file CSV</a>
+            <a href="/saved.json" class="btn btn-outline" target="_blank">🔗 Xem dữ liệu JSON</a>
+        </div>
+
+        <div class="table-responsive">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Mã Lưu Trữ</th>
+                        <th>Ngày Lưu</th>
+                        <th>Công Nghệ / Tool</th>
+                        <th>Trụ Cột Áp Dụng</th>
+                        <th>Nội Dung Thẩm Định & Giải Pháp</th>
+                        <th>Độ Ưu Tiên</th>
+                        <th>Trạng Thái</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {table_rows}
+                </tbody>
+            </table>
+        </div>
+
+        <footer>
+            VibeCheck AI Cloud • Đồng bộ tự động theo thời gian thực • Founder mở xem khi cần
+        </footer>
+    </div>
+</body>
+</html>"""
+
 

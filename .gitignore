@@ -7,3 +7,4 @@ sessions/
 .admin_chat_id
 .reminded_state.json
 *.tmp*
+backups/

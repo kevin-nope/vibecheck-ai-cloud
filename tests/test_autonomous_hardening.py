@@ -295,5 +295,87 @@ class TestAutonomousHardening(unittest.TestCase):
             if os.path.exists(test_state):
                 os.remove(test_state)
 
+    def test_15_reminders_permanently_deactivated(self):
+        """Founder Directive: Proactive reminders and background workers must be permanently disabled."""
+        from escalation_system import dispatch_overdue_alerts, start_proactive_escalation_worker, RemindedStateManager
+        # 1. dispatch_overdue_alerts must return empty list even when forced
+        alerted = dispatch_overdue_alerts(bot=MagicMock(), backlog_path="00_ACTION_BACKLOG.md", base_dir=".", force=True)
+        self.assertEqual(alerted, [])
+
+        # 2. start_proactive_escalation_worker must return None without spawning threads
+        worker = start_proactive_escalation_worker(bot=MagicMock(), backlog_path="00_ACTION_BACKLOG.md", base_dir=".")
+        self.assertIsNone(worker)
+
+        # 3. RemindedStateManager must permanently report disabled and refuse to remind
+        state_mgr = RemindedStateManager(".")
+        self.assertFalse(state_mgr.is_enabled())
+        self.assertFalse(state_mgr.should_remind("TASK-20260910-001"))
+
+    def test_16_saved_storage_endpoints(self):
+        """Centralized Storage: /saved, /saved.csv, and /saved.json endpoints work correctly."""
+        handler = launcher.UnifiedServerHandler.__new__(launcher.UnifiedServerHandler)
+        mock_wfile = MagicMock()
+        handler.wfile = mock_wfile
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        # 1. Test /saved (HTML table)
+        handler.path = "/saved"
+        handler.do_GET()
+        handler.send_response.assert_called_with(200)
+        handler.send_header.assert_any_call("Content-Type", "text/html; charset=utf-8")
+        written_html = b"".join([call.args[0] for call in mock_wfile.write.call_args_list]).decode("utf-8")
+        self.assertIn("Kho Lưu Trữ Công Nghệ & Giải Pháp", written_html)
+        self.assertIn("=IMPORTHTML", written_html)
+        self.assertIn("TASK-20260910-001", written_html)
+
+        # 2. Test /saved.csv
+        mock_wfile.reset_mock()
+        handler.send_response.reset_mock()
+        handler.send_header.reset_mock()
+        handler.path = "/saved.csv"
+        handler.do_GET()
+        handler.send_response.assert_called_with(200)
+        handler.send_header.assert_any_call("Content-Type", "text/csv; charset=utf-8")
+        written_csv = b"".join([call.args[0] for call in mock_wfile.write.call_args_list]).decode("utf-8")
+        self.assertIn("Mã Lưu Trữ", written_csv)
+        self.assertIn("TASK-20260910-001", written_csv)
+
+        # 3. Test /saved.json
+        mock_wfile.reset_mock()
+        handler.send_response.reset_mock()
+        handler.send_header.reset_mock()
+        handler.path = "/saved.json"
+        handler.do_GET()
+        handler.send_response.assert_called_with(200)
+        handler.send_header.assert_any_call("Content-Type", "application/json; charset=utf-8")
+        written_json = b"".join([call.args[0] for call in mock_wfile.write.call_args_list]).decode("utf-8")
+        import json
+        records = json.loads(written_json)
+        self.assertIsInstance(records, list)
+        self.assertGreaterEqual(len(records), 5)
+
+    def test_17_data_integrity_and_preservation(self):
+        """Data Preservation: All 5 historic tasks are preserved without duplicate IDs or data loss."""
+        from escalation_system import BacklogParser
+        records, _ = BacklogParser.parse_file("00_ACTION_BACKLOG.md")
+        task_ids = [r.task_id for r in records]
+
+        # 1. Verify no duplicates
+        self.assertEqual(len(task_ids), len(set(task_ids)))
+
+        # 2. Verify all 5 historical tasks present
+        expected_ids = [
+            "TASK-20260910-001",
+            "TASK-20260910-002",
+            "TASK-20260911-003",
+            "TASK-20260911-9695",
+            "TASK-20260911-1026"
+        ]
+        for exp_id in expected_ids:
+            self.assertIn(exp_id, task_ids)
+
 if __name__ == "__main__":
     unittest.main()
+
