@@ -25,13 +25,13 @@ logger = logging.getLogger("GoogleSheetSync")
 logger.setLevel(logging.INFO)
 
 SHEET_COLUMNS = [
-    "ID",
-    "Ngày lưu",
-    "Nguồn",
-    "Tiêu đề",
-    "Tóm tắt",
-    "Kết quả Red Team",
-    "Ghi chú"
+    "Mã Task",
+    "Thời Gian Lưu",
+    "Công Nghệ / Giải Pháp",
+    "Trụ Cột Áp Dụng",
+    "Việc Cần Làm Ngay (Action Item)",
+    "Đánh Giá Red Team",
+    "Trạng Thái Thực Hiện"
 ]
 
 QUEUE_FILE = ".sheet_sync_queue.json"
@@ -141,16 +141,27 @@ class GoogleSheetSyncAdapter:
 
         st_lower = status.lower()
         if "đình chỉ" in st_lower or "[-]" in st_lower:
-            redteam_result = "🔴 Đã đình chỉ (Cancelled)"
+            redteam_result = "🔴 Đã đình chỉ"
+            clean_status = "Đã đình chỉ"
         elif "thay thế" in st_lower or "[~]" in st_lower:
-            redteam_result = "↺ Đã thay thế (Superseded)"
+            redteam_result = "↺ Đã thay thế"
+            clean_status = "Đã thay thế"
         elif "hoàn thành" in st_lower or "[x]" in st_lower:
-            redteam_result = "🟢 Hoàn thành / Duy trì nghiêm ngặt"
+            redteam_result = "🟢 Hoàn thành"
+            clean_status = "Duy trì nghiêm ngặt"
         else:
-            redteam_result = "🟢 Phê duyệt lưu trữ (Approved)"
+            redteam_result = "🟢 Phê duyệt lưu trữ"
+            clean_status = "Chờ triển khai"
 
-        clean_notes = f"{status} | {report_link}".strip(" |")
-        return [task_id, date_str, tool_name, pillar, action_item, redteam_result, clean_notes]
+        import re
+        m = re.match(r'\[([^\]]+)\]\([^\)]+\)', str(report_link).strip())
+        detail_name = m.group(1) if m else str(report_link).strip()
+        if detail_name and detail_name != "None":
+            status_col = f"{clean_status} ({detail_name})"
+        else:
+            status_col = clean_status
+
+        return [task_id, date_str, tool_name, pillar, action_item, redteam_result, status_col]
 
     @classmethod
     def sync_record_async(cls, record: Any):

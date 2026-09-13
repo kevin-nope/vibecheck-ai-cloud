@@ -467,7 +467,7 @@ class TestAutonomousHardening(unittest.TestCase):
 
         self.assertEqual(len(SHEET_COLUMNS), 7)
         self.assertEqual(SHEET_COLUMNS, [
-            "ID", "Ngày lưu", "Nguồn", "Tiêu đề", "Tóm tắt", "Kết quả Red Team", "Ghi chú"
+            "Mã Task", "Thời Gian Lưu", "Công Nghệ / Giải Pháp", "Trụ Cột Áp Dụng", "Việc Cần Làm Ngay (Action Item)", "Đánh Giá Red Team", "Trạng Thái Thực Hiện"
         ])
 
         records, _ = BacklogParser.parse_file("00_ACTION_BACKLOG.md")
