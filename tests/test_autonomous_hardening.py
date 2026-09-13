@@ -312,10 +312,11 @@ class TestAutonomousHardening(unittest.TestCase):
         self.assertFalse(state_mgr.should_remind("TASK-20260910-001"))
 
     def test_16_saved_storage_endpoints(self):
-        """Centralized Storage: /saved, /saved.csv, and /saved.json endpoints work correctly."""
+        """Centralized Storage: Authenticated access to /saved, /saved.csv, and /saved.json endpoints work correctly."""
         handler = launcher.UnifiedServerHandler.__new__(launcher.UnifiedServerHandler)
         mock_wfile = MagicMock()
         handler.wfile = mock_wfile
+        handler.headers = {"Authorization": "Bearer dev_secret_local_only_12345"}
         handler.send_response = MagicMock()
         handler.send_header = MagicMock()
         handler.end_headers = MagicMock()
@@ -327,7 +328,6 @@ class TestAutonomousHardening(unittest.TestCase):
         handler.send_header.assert_any_call("Content-Type", "text/html; charset=utf-8")
         written_html = b"".join([call.args[0] for call in mock_wfile.write.call_args_list]).decode("utf-8")
         self.assertIn("Kho Lưu Trữ Công Nghệ & Giải Pháp", written_html)
-        self.assertIn("=IMPORTHTML", written_html)
         self.assertIn("TASK-20260910-001", written_html)
 
         # 2. Test /saved.csv
@@ -375,6 +375,89 @@ class TestAutonomousHardening(unittest.TestCase):
         ]
         for exp_id in expected_ids:
             self.assertIn(exp_id, task_ids)
+
+    def test_18_anonymous_archive_access_denied(self):
+        """Privacy: Anonymous access to /saved, /saved.csv, /saved.json, /backlog, /backlog.csv is strictly DENIED (401)."""
+        handler = launcher.UnifiedServerHandler.__new__(launcher.UnifiedServerHandler)
+        mock_wfile = MagicMock()
+        handler.wfile = mock_wfile
+        handler.headers = {}
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        endpoints_to_test = [
+            "/saved",
+            "/saved.csv",
+            "/saved.json",
+            "/backlog",
+            "/backlog.csv",
+            "/backlog.json"
+        ]
+        for endpoint in endpoints_to_test:
+            mock_wfile.reset_mock()
+            handler.send_response.reset_mock()
+            handler.send_header.reset_mock()
+            handler.path = endpoint
+            handler.do_GET()
+
+            # Must return 401 Unauthorized
+            handler.send_response.assert_called_with(401)
+            handler.send_header.assert_any_call("WWW-Authenticate", 'Basic realm="VibeCheck Private Archive"')
+            written = b"".join([call.args[0] for call in mock_wfile.write.call_args_list]).decode("utf-8")
+            self.assertIn("Unauthorized", written)
+            self.assertNotIn("TASK-20260910-001", written)
+
+    def test_19_founder_multi_auth_methods(self):
+        """Founder Access: Multiple convenient auth methods (Bearer, Basic, X-Auth-Token, ?token=) all grant access (200)."""
+        import base64
+        secret = "dev_secret_local_only_12345"
+
+        handler = launcher.UnifiedServerHandler.__new__(launcher.UnifiedServerHandler)
+        mock_wfile = MagicMock()
+        handler.wfile = mock_wfile
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+
+        # 1. Bearer Header
+        handler.headers = {"Authorization": f"Bearer {secret}"}
+        handler.path = "/saved"
+        handler.do_GET()
+        handler.send_response.assert_called_with(200)
+
+        # 2. Basic Auth Header
+        mock_wfile.reset_mock()
+        handler.send_response.reset_mock()
+        b64_creds = base64.b64encode(f"founder:{secret}".encode("utf-8")).decode("utf-8")
+        handler.headers = {"Authorization": f"Basic {b64_creds}"}
+        handler.path = "/saved"
+        handler.do_GET()
+        handler.send_response.assert_called_with(200)
+
+        # 3. X-Auth-Token Header
+        mock_wfile.reset_mock()
+        handler.send_response.reset_mock()
+        handler.headers = {"X-Auth-Token": secret}
+        handler.path = "/saved.csv"
+        handler.do_GET()
+        handler.send_response.assert_called_with(200)
+
+        # 4. Query param ?token=
+        mock_wfile.reset_mock()
+        handler.send_response.reset_mock()
+        handler.headers = {}
+        handler.path = f"/saved?token={secret}"
+        handler.do_GET()
+        handler.send_response.assert_called_with(200)
+
+        # 5. Query param ?key=
+        mock_wfile.reset_mock()
+        handler.send_response.reset_mock()
+        handler.headers = {}
+        handler.path = f"/saved.json?key={secret}"
+        handler.do_GET()
+        handler.send_response.assert_called_with(200)
 
 if __name__ == "__main__":
     unittest.main()

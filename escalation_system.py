@@ -880,10 +880,10 @@ def export_backlog_to_csv(backlog_path: str) -> str:
     return output.getvalue()
 
 
-def export_backlog_to_html(backlog_path: str) -> str:
+def export_backlog_to_html(backlog_path: str, token: str = None) -> str:
     """
     Exports backlog items to a clean, responsive HTML page with modern styling.
-    Compatible with Google Sheets =IMPORTHTML(url, "table", 1).
+    Accessible only by authorized Founder via secure token.
     """
     import html
     records = []
@@ -919,6 +919,9 @@ def export_backlog_to_html(backlog_path: str) -> str:
         """)
 
     table_rows = "\n".join(rows_html) if rows_html else '<tr><td colspan="7" style="text-align:center;padding:24px;color:#94a3b8;">Chưa có nội dung nào được lưu.</td></tr>'
+
+    csv_url = f"/saved.csv?token={token}" if token else "/saved.csv"
+    json_url = f"/saved.json?token={token}" if token else "/saved.json"
 
     return f"""<!DOCTYPE html>
 <html lang="vi">
@@ -1031,14 +1034,14 @@ def export_backlog_to_html(backlog_path: str) -> str:
         <div class="subtitle">Nơi lưu trữ tập trung các nội dung đã được CTO & Red Team thẩm định. Không nhắc nhở, không thúc ép tiến độ.</div>
 
         <div class="info-box">
-            📊 <b>Tích hợp Google Sheets tự động cập nhật:</b> Mở Google Sheet bất kỳ, tại ô <b>A1</b> dán công thức:
+            🔒 <b>Kho lưu trữ riêng tư (Private Archive):</b> Được bảo vệ và phân quyền chỉ dành riêng cho Founder.
             <br>
-            <code style="background:#dbeafe;padding:3px 6px;border-radius:4px;display:inline-block;margin-top:6px;font-weight:bold;">=IMPORTHTML("https://vibecheck-ai-bot.onrender.com/saved", "table", 1)</code>
+            Để xem hoặc đồng bộ vào Google Sheets, anh có thể tải file CSV bằng nút <b>Tải file CSV</b> bên dưới và nhập trực tiếp vào Google Sheets (Tệp &gt; Nhập).
         </div>
 
         <div class="actions">
-            <a href="/saved.csv" class="btn" download="vibecheck_saved.csv">📥 Tải file CSV</a>
-            <a href="/saved.json" class="btn btn-outline" target="_blank">🔗 Xem dữ liệu JSON</a>
+            <a href="{csv_url}" class="btn" download="vibecheck_saved.csv">📥 Tải file CSV</a>
+            <a href="{json_url}" class="btn btn-outline" target="_blank">🔗 Xem dữ liệu JSON</a>
         </div>
 
         <div class="table-responsive">

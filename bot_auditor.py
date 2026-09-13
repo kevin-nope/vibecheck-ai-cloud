@@ -95,6 +95,15 @@ load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+
+def get_saved_archive_url(suffix: str = "") -> str:
+    """Trả về URL truy cập kho lưu trữ riêng tư được bảo vệ bằng token xác thực cho Founder."""
+    base_url = f"https://vibecheck-ai-bot.onrender.com/saved{suffix}"
+    token = (os.getenv("ARCHIVE_AUTH_KEY") or os.getenv("WEBHOOK_SECRET_TOKEN") or "").strip()
+    if token:
+        return f"{base_url}?token={token}"
+    return base_url
+
 # ==============================================================================
 # CƠ CHẾ KHÓA ĐƠN TIẾN TRÌNH (SINGLE-INSTANCE LOCK — CHỐNG LỖI 409 CONFLICT)
 # ==============================================================================
@@ -1501,7 +1510,7 @@ def setup_bot():
     def create_menu_dashboard_markup():
         markup = tele_types.InlineKeyboardMarkup(row_width=2)
         btn_bl = tele_types.InlineKeyboardButton("📂 Xem Kho Lưu Trữ", callback_data="menu_backlog")
-        btn_wb = tele_types.InlineKeyboardButton("🌐 Mở Web / Sheet", url="https://vibecheck-ai-bot.onrender.com/saved")
+        btn_wb = tele_types.InlineKeyboardButton("🌐 Mở Web / Kho Lưu Trữ", url=get_saved_archive_url())
         btn_st = tele_types.InlineKeyboardButton("⚙️ Trạng Thái", callback_data="menu_status")
         btn_rs = tele_types.InlineKeyboardButton("🔄 Xóa Chat", callback_data="menu_reset")
         btn_hp = tele_types.InlineKeyboardButton("📖 Hướng Dẫn Sử Dụng", callback_data="menu_help")
@@ -1772,15 +1781,12 @@ def setup_bot():
         if clean_lower in ["🌐 mở web / sheet", "mở web", "mở sheet", "sheet", "web"]:
             send_long_message(
                 bot, chat_id,
-                "🌐 <b>KHO LƯU TRỮ CÔNG NGHỆ TẬP TRUNG:</b>\n\n"
+                "🌐 <b>KHO LƯU TRỮ CÔNG NGHỆ TẬP TRUNG (PRIVATE):</b>\n\n"
                 "• <b>Mở trên trình duyệt điện thoại / máy tính</b>:\n"
-                "👉 https://vibecheck-ai-bot.onrender.com/saved\n\n"
-                "• <b>Đồng bộ tự động vào Google Sheets</b>:\n"
-                "Tại ô <code>A1</code> trong Google Sheet, nhập công thức:\n"
-                "<code>=IMPORTHTML(\"https://vibecheck-ai-bot.onrender.com/saved\", \"table\", 1)</code>\n\n"
-                "• <b>Tải file CSV</b>:\n"
-                "👉 https://vibecheck-ai-bot.onrender.com/saved.csv\n\n"
-                "<i>(Hệ thống lưu trữ độc lập, không nhắc việc, không spam Telegram)</i>"
+                f"👉 {get_saved_archive_url()}\n\n"
+                "• <b>Tải file CSV (mở offline hoặc import vào Google Sheets)</b>:\n"
+                f"👉 {get_saved_archive_url('.csv')}\n\n"
+                "<i>(Kho lưu trữ riêng tư chỉ dành cho Founder. Không nhắc việc, không spam Telegram)</i>"
             )
             return
 
@@ -1806,8 +1812,7 @@ def setup_bot():
 
         # TẮT / BẬT NHẮC NHỞ BẰNG TIẾNG VIỆT TỰ NHIÊN
         if any(p in clean_lower for p in ["tắt nhắc nhở", "tat nhac nho", "đừng nhắc nữa", "dung nhac nua", "tắt thông báo", "tat thong bao", "dừng nhắc nhở", "không nhắc nữa"]):
-            send_long_message(bot, chat_id, "🔕 **TÍNH NĂNG NHẮC VIỆC ĐÃ ĐƯỢC GỠ BỎ HOÀN TOÀN!**\nBot CTO sẽ không bao giờ tự động gửi tin nhắc nhở làm phiền anh nữa. Toàn bộ nội dung lưu trữ được xem tập trung tại https://vibecheck-ai-bot.onrender.com/saved hoặc gõ `/backlog`.")
-            return
+            send_long_message(bot, chat_id, f"🔕 **TÍNH NĂNG NHẮC VIỆC ĐÃ ĐƯỢC GỠ BỎ HOÀN TOÀN!**\nBot CTO sẽ không bao giờ tự động gửi tin nhắc nhở làm phiền anh nữa. Toàn bộ nội dung lưu trữ được xem tập trung tại {get_saved_archive_url()} hoặc gõ `/backlog`.")
             return
 
         if any(p in clean_lower for p in ["bật nhắc nhở", "bat nhac nho", "mở nhắc nhở"]):
@@ -2127,10 +2132,10 @@ def setup_bot():
                 return
 
             msg = f"📂 <b>KHO LƯU TRỮ CÔNG NGHỆ & GIẢI PHÁP TẬP TRUNG ({len(records)} mục):</b>\n\n"
-            msg += "🌐 <b>Xem trực tuyến (Web / Google Sheets)</b>:\n👉 https://vibecheck-ai-bot.onrender.com/saved\n\n"
+            msg += f"🌐 <b>Xem trực tuyến (Web riêng tư)</b>:\n👉 {get_saved_archive_url()}\n\n"
 
             markup = tele_types.InlineKeyboardMarkup(row_width=2)
-            btn_web = tele_types.InlineKeyboardButton("🌐 Mở Kho Lưu Trữ (Web / Sheet)", url="https://vibecheck-ai-bot.onrender.com/saved")
+            btn_web = tele_types.InlineKeyboardButton("🌐 Mở Kho Lưu Trữ (Web)", url=get_saved_archive_url())
             markup.add(btn_web)
 
             for idx, r in enumerate(records[:6], 1):
@@ -2161,7 +2166,7 @@ def setup_bot():
             "🔕 <b>TÍNH NĂNG NHẮC VIỆC ĐÃ ĐƯỢC TẮT HOÀN TOÀN</b>\n\n"
             "Theo đúng chỉ đạo của Founder, Bot CTO không còn cơ chế gửi thông báo nhắc việc tồn đọng hay làm phiền trên Telegram.\n\n"
             "📂 <b>Kho lưu trữ tập trung để xem lại khi cần:</b>\n"
-            "👉 https://vibecheck-ai-bot.onrender.com/saved\n"
+            f"👉 {get_saved_archive_url()}\n"
             "<i>(Hoặc gõ /backlog để xem danh sách tóm tắt)</i>"
         )
         send_long_message(bot, chat_id, msg)
@@ -2183,10 +2188,10 @@ def setup_bot():
         status_text = (
             "⚙️ <b>TRẠNG THÁI LƯU TRỮ & NHẮC VIỆC:</b>\n\n"
             "• <b>Cơ chế nhắc việc tự động</b>: ❌ ĐÃ GỠ BỎ HOÀN TOÀN (Zero Telegram spam)\n"
-            "• <b>Kho lưu trữ tập trung</b>: 🟢 ĐANG HOẠT ĐỘNG (Durable & Web-accessible)\n"
+            "• <b>Kho lưu trữ tập trung</b>: 🟢 ĐANG HOẠT ĐỘNG (Private & Durable)\n"
             f"• <b>Tổng số mục đã lưu</b>: {count} mục\n"
-            "• <b>Trang web xem tập trung</b>: https://vibecheck-ai-bot.onrender.com/saved\n"
-            "• <b>Tích hợp Google Sheets</b>: <code>=IMPORTHTML(\"https://vibecheck-ai-bot.onrender.com/saved\", \"table\", 1)</code>\n\n"
+            f"• <b>Trang web xem riêng tư</b>: {get_saved_archive_url()}\n"
+            f"• <b>Tải dữ liệu CSV</b>: {get_saved_archive_url('.csv')}\n\n"
             "💡 <i>Founder tự mở xem khi cần, không có áp lực deadline hay nghĩa vụ phải làm.</i>"
         )
         send_long_message(bot, chat_id, status_text)
@@ -2386,8 +2391,8 @@ def setup_bot():
                             f"• <b>Mã lưu trữ</b>: <code>{new_task_id}</code>\n"
                             f"• <b>Công nghệ</b>: <b>{cached.get('name', 'Công cụ mới')}</b>\n"
                             f"• <b>File chi tiết</b>: <code>{file_name}</code>\n\n"
-                            f"🌐 <b>Xem trực tuyến (Web / Google Sheets)</b>:\n"
-                            f"👉 https://vibecheck-ai-bot.onrender.com/saved\n\n"
+                            f"🌐 <b>Xem trực tuyến (Web riêng tư)</b>:\n"
+                            f"👉 {get_saved_archive_url()}\n\n"
                             f"<i>(Hệ thống KHÔNG tự động nhắc lại nội dung này. Khi cần cân nhắc triển khai, bạn có thể tự mở kho lưu trữ hoặc sao chép để hỏi lại ChatGPT/Claude/Gemini)</i>"
                         )
                         send_long_message(bot, call.message.chat.id, msg)
@@ -2398,7 +2403,7 @@ def setup_bot():
                         f"📌 <b>ĐÃ LƯU VÀO KHO LƯU TRỮ TẬP TRUNG!</b>\n\n"
                         f"• <b>File</b>: <code>{file_name}</code> (trong <code>Khao_Sat_Cong_Nghe/</code>)\n"
                         f"• <b>Phân loại</b>: <b>[{cached.get('verdict', 'LƯU THAM KHẢO')}]</b>\n\n"
-                        f"🌐 <b>Xem trực tuyến</b>: https://vibecheck-ai-bot.onrender.com/saved"
+                        f"🌐 <b>Xem trực tuyến</b>: {get_saved_archive_url()}"
                     )
                     send_long_message(bot, call.message.chat.id, msg)
                 return
@@ -2448,8 +2453,8 @@ def setup_bot():
                         f"• <b>Mục cũ</b>: <code>{old_task_id}</code> ➔ <code>[~] Thay thế bởi {new_task_id}</code>\n"
                         f"• <b>Mục mới</b>: <code>{new_task_id}</code> (<b>{cached['name']}</b>)\n"
                         f"• <b>File báo cáo mới</b>: <code>{file_name}</code>\n\n"
-                        f"🌐 <b>Xem trực tuyến (Web / Google Sheets)</b>:\n"
-                        f"👉 https://vibecheck-ai-bot.onrender.com/saved"
+                        f"🌐 <b>Xem trực tuyến (Web riêng tư)</b>:\n"
+                        f"👉 {get_saved_archive_url()}"
                     )
                     send_long_message(bot, call.message.chat.id, msg)
                 except Exception as e:

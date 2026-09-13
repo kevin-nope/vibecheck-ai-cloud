@@ -23,6 +23,9 @@ import hashlib
 import threading
 import logging
 import concurrent.futures
+import hmac
+import base64
+from urllib.parse import urlparse, parse_qs
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Dict, Any
 
@@ -85,6 +88,86 @@ def get_webhook_secret_token() -> str:
     return env_secret
 
 
+def is_archive_authorized(handler: BaseHTTPRequestHandler) -> tuple[bool, Optional[str]]:
+    """
+    Verifies that the request to private archive endpoints is authorized.
+    Checks (constant-time):
+      1. Header 'Authorization: Bearer <token>'
+      2. Header 'Authorization: Basic <base64(user:pass)>' (pass or user matches valid token)
+      3. Header 'X-Auth-Token: <token>'
+      4. Header 'X-Telegram-Bot-Api-Secret-Token: <token>'
+      5. Query parameter '?token=<token>' or '?key=<token>' or '?auth=<token>'
+    Returns (is_authorized, active_token).
+    """
+    valid_tokens = []
+    archive_key = (os.getenv("ARCHIVE_AUTH_KEY") or "").strip()
+    if archive_key:
+        valid_tokens.append(archive_key)
+    webhook_secret = (os.getenv("WEBHOOK_SECRET_TOKEN") or "").strip()
+    if webhook_secret:
+        valid_tokens.append(webhook_secret)
+    if not valid_tokens:
+        valid_tokens.append("dev_secret_local_only_12345")
+
+    def _matches_any(cand: str) -> tuple[bool, Optional[str]]:
+        if not cand:
+            return False, None
+        clean_cand = cand.strip()
+        for v in valid_tokens:
+            if hmac.compare_digest(clean_cand, v):
+                return True, v
+        return False, None
+
+    # 1. Check Authorization header
+    auth_header = ""
+    if hasattr(handler, "headers") and handler.headers:
+        auth_header = handler.headers.get("Authorization", "") or ""
+    if auth_header:
+        if auth_header.startswith("Bearer "):
+            matched, tok = _matches_any(auth_header[7:])
+            if matched:
+                return True, tok
+        elif auth_header.startswith("Basic "):
+            try:
+                encoded = auth_header[6:].strip()
+                decoded = base64.b64decode(encoded).decode("utf-8")
+                parts = decoded.split(":", 1)
+                user = parts[0]
+                passwd = parts[1] if len(parts) > 1 else ""
+                matched, tok = _matches_any(passwd)
+                if matched:
+                    return True, tok
+                matched, tok = _matches_any(user)
+                if matched:
+                    return True, tok
+            except Exception:
+                pass
+
+    # 2. Check custom headers
+    if hasattr(handler, "headers") and handler.headers:
+        for h_name in ("X-Auth-Token", "X-Telegram-Bot-Api-Secret-Token", "X-API-Key"):
+            h_val = handler.headers.get(h_name, "")
+            if h_val:
+                matched, tok = _matches_any(h_val)
+                if matched:
+                    return True, tok
+
+    # 3. Check query parameters
+    try:
+        parsed = urlparse(handler.path)
+        params = parse_qs(parsed.query)
+        for key in ("token", "key", "auth", "secret"):
+            if key in params:
+                for cand in params[key]:
+                    matched, tok = _matches_any(cand)
+                    if matched:
+                        return True, tok
+    except Exception:
+        pass
+
+    return False, None
+
+
 class UnifiedServerHandler(BaseHTTPRequestHandler):
     server_version = "VibeCheckServer/3.0"
 
@@ -122,54 +205,64 @@ class UnifiedServerHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'{"status": "ready"}')
             return
 
-        elif path in ("/saved", "/backlog"):
-            import bot_auditor
-            from escalation_system import export_backlog_to_html
-            html_content = export_backlog_to_html(bot_auditor.BACKLOG_FILE)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(html_content.encode("utf-8"))
-            return
+        elif path in ("/saved", "/backlog", "/saved.csv", "/backlog.csv", "/saved.json", "/backlog.json"):
+            is_authorized, active_tok = is_archive_authorized(self)
+            if not is_authorized:
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("WWW-Authenticate", 'Basic realm="VibeCheck Private Archive"')
+                self.end_headers()
+                self.wfile.write(b'{"error": "Unauthorized: Access restricted to Founder only"}')
+                return
 
-        elif path in ("/saved.csv", "/backlog.csv"):
-            import bot_auditor
-            from escalation_system import export_backlog_to_csv
-            csv_content = export_backlog_to_csv(bot_auditor.BACKLOG_FILE)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/csv; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="vibecheck_saved.csv"')
-            self.end_headers()
-            self.wfile.write(csv_content.encode("utf-8"))
-            return
+            if path in ("/saved", "/backlog"):
+                import bot_auditor
+                from escalation_system import export_backlog_to_html
+                html_content = export_backlog_to_html(bot_auditor.BACKLOG_FILE, token=active_tok)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(html_content.encode("utf-8"))
+                return
 
-        elif path in ("/saved.json", "/backlog.json"):
-            import bot_auditor
-            from escalation_system import BacklogParser
-            records = []
-            if os.path.exists(bot_auditor.BACKLOG_FILE):
-                try:
-                    recs, _ = BacklogParser.parse_file(bot_auditor.BACKLOG_FILE)
-                    records = [
-                        {
-                            "task_id": r.task_id,
-                            "date": r.date_str,
-                            "tool_name": r.tool_name,
-                            "pillar": r.pillar,
-                            "action_item": r.action_item,
-                            "priority": r.priority,
-                            "status": r.status,
-                            "file_link": r.report_link
-                        }
-                        for r in recs
-                    ]
-                except Exception as e:
-                    logger.error(f"JSON export error: {e}")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(json.dumps(records, ensure_ascii=False, indent=2).encode("utf-8"))
-            return
+            elif path in ("/saved.csv", "/backlog.csv"):
+                import bot_auditor
+                from escalation_system import export_backlog_to_csv
+                csv_content = export_backlog_to_csv(bot_auditor.BACKLOG_FILE)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="vibecheck_saved.csv"')
+                self.end_headers()
+                self.wfile.write(csv_content.encode("utf-8"))
+                return
+
+            elif path in ("/saved.json", "/backlog.json"):
+                import bot_auditor
+                from escalation_system import BacklogParser
+                records = []
+                if os.path.exists(bot_auditor.BACKLOG_FILE):
+                    try:
+                        recs, _ = BacklogParser.parse_file(bot_auditor.BACKLOG_FILE)
+                        records = [
+                            {
+                                "task_id": r.task_id,
+                                "date": r.date_str,
+                                "tool_name": r.tool_name,
+                                "pillar": r.pillar,
+                                "action_item": r.action_item,
+                                "priority": r.priority,
+                                "status": r.status,
+                                "file_link": r.report_link
+                            }
+                            for r in recs
+                        ]
+                    except Exception as e:
+                        logger.error(f"JSON export error: {e}")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(records, ensure_ascii=False, indent=2).encode("utf-8"))
+                return
 
         elif path == "/":
             self.send_response(200)
