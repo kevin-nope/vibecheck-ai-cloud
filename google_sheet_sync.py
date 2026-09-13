@@ -154,6 +154,8 @@ class GoogleSheetSyncAdapter:
 
     @classmethod
     def sync_record_async(cls, record: Any):
+        if not cls.is_configured():
+            return
         cls._executor.submit(cls.sync_record, record)
 
     @classmethod
@@ -171,16 +173,16 @@ class GoogleSheetSyncAdapter:
             service = cls._get_service()
             sheet_id = cls.get_sheet_id()
             if not service or not sheet_id:
-                cls._enqueue_pending(task_id, row_data)
+                if cls.is_configured():
+                    cls._enqueue_pending(task_id, row_data)
                 return False
 
             return cls._sync_via_api(service, sheet_id, row_data)
         except Exception as e:
             logger.warning(f"GoogleSheetSync: Transient error during sync: {e}")
             try:
-                task_id = getattr(record, "task_id", None) or (record.get("task_id") if isinstance(record, dict) else None)
-                if task_id:
-                    cls._enqueue_pending(task_id, cls.record_to_row(record))
+                if 'task_id' in locals() and task_id and 'row_data' in locals():
+                    cls._enqueue_pending(task_id, row_data)
             except Exception:
                 pass
             return False
@@ -189,6 +191,9 @@ class GoogleSheetSyncAdapter:
     def _sync_via_webhook(cls, row_data: List[str]) -> bool:
         import urllib.request
         webhook_url = os.getenv("GOOGLE_SHEET_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            return False
+
         payload = json.dumps({
             "action": "upsert",
             "task_id": row_data[0],
@@ -199,13 +204,31 @@ class GoogleSheetSyncAdapter:
         req = urllib.request.Request(
             webhook_url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "VibeCheck-CTO-Sync/1.0"
+            },
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=10) as res:
-            if res.status in (200, 201):
-                logger.info(f"✅ GoogleSheetSync: Synced {row_data[0]} via Webhook.")
-                return True
+        try:
+            with urllib.request.urlopen(req, timeout=15) as res:
+                body = res.read().decode("utf-8")
+                try:
+                    resp_json = json.loads(body)
+                    if resp_json.get("status") == "success":
+                        logger.info(f"✅ GoogleSheetSync: Synced {row_data[0]} via Webhook.")
+                        return True
+                    else:
+                        logger.warning(f"GoogleSheetSync: Webhook returned error: {resp_json}")
+                        return False
+                except Exception:
+                    if res.status in (200, 201):
+                        logger.info(f"✅ GoogleSheetSync: Synced {row_data[0]} via Webhook (status {res.status}).")
+                        return True
+        except Exception as e:
+            logger.warning(f"GoogleSheetSync: Webhook request failed: {e}")
+            cls._enqueue_pending(row_data[0], row_data)
+            return False
         return False
 
     @classmethod
@@ -270,21 +293,26 @@ class GoogleSheetSyncAdapter:
 
     @classmethod
     def _enqueue_pending(cls, task_id: str, row_data: List[str]):
-        try:
-            with cls._lock:
-                queue = {}
-                if os.path.exists(QUEUE_FILE):
-                    try:
-                        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-                            queue = json.load(f)
-                    except Exception:
-                        queue = {}
-                queue[task_id] = row_data
-                with open(QUEUE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(queue, f, ensure_ascii=False, indent=2)
-                logger.info(f"GoogleSheetSync: Enqueued {task_id} to offline queue ({len(queue)} pending).")
-        except Exception as e:
-            logger.warning(f"Could not enqueue pending sync: {e}")
+        with cls._lock:
+            for attempt in range(5):
+                try:
+                    queue = {}
+                    if os.path.exists(QUEUE_FILE):
+                        try:
+                            with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+                                queue = json.load(f)
+                        except Exception:
+                            queue = {}
+                    queue[task_id] = row_data
+                    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
+                        json.dump(queue, f, ensure_ascii=False, indent=2)
+                    logger.info(f"GoogleSheetSync: Enqueued {task_id} to offline queue ({len(queue)} pending).")
+                    break
+                except (PermissionError, OSError):
+                    time.sleep(0.05)
+                except Exception as e:
+                    logger.warning(f"Could not enqueue pending sync: {e}")
+                    break
 
     @classmethod
     def flush_pending_queue(cls) -> int:

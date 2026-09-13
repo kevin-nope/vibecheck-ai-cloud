@@ -514,16 +514,20 @@ class TestAutonomousHardening(unittest.TestCase):
         from google_sheet_sync import GoogleSheetSyncAdapter, QUEUE_FILE
         # Ensure clean queue
         if os.path.exists(QUEUE_FILE):
-            os.remove(QUEUE_FILE)
+            try:
+                os.remove(QUEUE_FILE)
+            except Exception:
+                pass
 
-        # Force failure by using invalid sheet ID or mocked failure
+        # Force failure by using mocked failure in Google Sheets API
         mock_service = MagicMock()
         mock_service.spreadsheets.return_value.values.return_value.get.side_effect = Exception("Google API 429 Quota Exceeded")
 
         row = ["TASK-TEST-001", "2026-09-13", "Test Tool", "Pillar", "Action", "Result", "Notes"]
-        # Must catch exception and return False without raising
-        result = GoogleSheetSyncAdapter.sync_record(row)
-        self.assertFalse(result)
+        with patch.object(GoogleSheetSyncAdapter, "_get_service", return_value=mock_service), \
+             patch.object(GoogleSheetSyncAdapter, "get_sheet_id", return_value="test_sheet_id"):
+            result = GoogleSheetSyncAdapter.sync_record(row)
+            self.assertFalse(result)
 
         # Must be safely queued in offline queue file
         self.assertTrue(os.path.exists(QUEUE_FILE))
@@ -533,7 +537,10 @@ class TestAutonomousHardening(unittest.TestCase):
 
         # Clean up queue
         if os.path.exists(QUEUE_FILE):
-            os.remove(QUEUE_FILE)
+            try:
+                os.remove(QUEUE_FILE)
+            except Exception:
+                pass
 
     def test_23_google_sheet_flush_queue(self):
         """Google Sheet Recovery: Offline queue flushes when connection is restored."""
@@ -565,6 +572,41 @@ class TestAutonomousHardening(unittest.TestCase):
         self.assertIsNone(start_proactive_escalation_worker(MagicMock(), "00_ACTION_BACKLOG.md", "."))
         self.assertFalse(RemindedStateManager(".").is_enabled())
 
+    def test_25_google_sheet_webhook_hardening(self):
+        """Webhook Sync Hardening: Validates secret payload, response parsing, and error queuing."""
+        from google_sheet_sync import GoogleSheetSyncAdapter, QUEUE_FILE
+        row = ["TASK-20260914-999", "2026-09-14", "Webhook Tool", "Pillar", "Action", "Result", "Notes"]
+        
+        # 1. Success case with status: success
+        mock_resp_success = MagicMock()
+        mock_resp_success.status = 200
+        mock_resp_success.read.return_value = json.dumps({"status": "success", "action": "appended"}).encode("utf-8")
+        mock_resp_success.__enter__.return_value = mock_resp_success
+
+        with patch("os.getenv", side_effect=lambda k, default="": "https://script.google.com/macros/s/test/exec" if k == "GOOGLE_SHEET_WEBHOOK_URL" else "test_secret" if k == "GOOGLE_SHEET_WEBHOOK_SECRET" else default), \
+             patch("urllib.request.urlopen", return_value=mock_resp_success):
+            ok = GoogleSheetSyncAdapter.sync_record(row)
+            self.assertTrue(ok)
+
+        # 2. Rejection case: 401 / error response
+        mock_resp_fail = MagicMock()
+        mock_resp_fail.status = 200
+        mock_resp_fail.read.return_value = json.dumps({"status": "error", "message": "Unauthorized"}).encode("utf-8")
+        mock_resp_fail.__enter__.return_value = mock_resp_fail
+
+        with patch("os.getenv", side_effect=lambda k, default="": "https://script.google.com/macros/s/test/exec" if k == "GOOGLE_SHEET_WEBHOOK_URL" else "bad_secret" if k == "GOOGLE_SHEET_WEBHOOK_SECRET" else default), \
+             patch("urllib.request.urlopen", return_value=mock_resp_fail):
+            ok = GoogleSheetSyncAdapter.sync_record(row)
+            self.assertFalse(ok)
+
+        # Clean up queue
+        if os.path.exists(QUEUE_FILE):
+            try:
+                os.remove(QUEUE_FILE)
+            except Exception:
+                pass
+
 if __name__ == "__main__":
     unittest.main()
+
 
